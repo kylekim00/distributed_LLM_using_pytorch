@@ -1,0 +1,9 @@
+{
+  "repo_id": "unsloth/Llama-3.2-3B-Instruct",
+  "local_dir": "/mnt/hdd3/backup_khk/distributed_pytorch/models/Llama-3.2-3B-Instruct",
+  "output_dir": "/mnt/hdd3/backup_khk/distributed_pytorch/models/Llama-3.2-3B-Instruct-split",
+  "split_idx": 14,
+  "num_hidden_layers": 28,
+  "hidden_size": 3072,
+  "vocab_size": 128256
+}
