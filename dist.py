@@ -3,10 +3,12 @@ import torch.distributed as dist
 
 dist.init_process_group('gloo')
 rank = dist.get_rank()
+a = torch.empty([1,1])
 if rank == 0:
-    print(0)
+    
+    print(a)
 elif rank==1:
-    print(1)
+    print(a)
 
 
 # MAX_INFLIGHT = 4
