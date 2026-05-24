@@ -1,53 +1,12 @@
-import os
 import torch
 import torch.distributed as dist
-from transformers import AutoConfig, AutoTokenizer
-from safetensors.torch import load_file
-from .parser import MyParser
-from .download import download_model
-from .division_model import Model1, Model2
 
-
-
-def load_model1(
-        input_dir:str,
-        device:str="cpu"
-):
-    config = AutoConfig.from_pretrained(input_dir)
-    model1 = Model1(config)
-    state = load_file(os.path.join(input_dir, "model1.safetensors"))
-    model1.load_state_dict(state, strict=True)
-    model1.to(device=device)
-    model1.eval()
-    return model1
-    
-
-
-def load_model2(
-        input_dir:str,
-        device:str="cpu"
-):
-    config = AutoConfig.from_pretrained(input_dir)
-    model2 = Model2(config)
-    state = load_file(os.path.join(input_dir, "model2.safetensors"))
-    model2.load_state_dict(state, strict=True)
-    model2.to(device=device)
-    model2.eval()
-    return model2
-
-def _send_tensor(tensor:torch.tensor, dst:int):
-    pass
-
-def _recv_tensor(tensor:torch.tensor, src:int):
-    
-
-def run_dist(
-        input_dir: str="./models/Llama-3.2-3B-Instruct-split"
-
-):
-    pass
-
-
+dist.init_process_group('gloo')
+rank = dist.get_rank()
+if rank == 0:
+    print(0)
+elif rank==1:
+    print(1)
 
 
 # MAX_INFLIGHT = 4
@@ -95,3 +54,16 @@ def run_dist(
 #             new_req = dist.irecv(new_buf, src=0)
 #             receiver_queue.append((new_req, new_buf))
 
+
+
+    # dist.init_process_group(backend="gloo")
+    
+    # rank = dist.get_rank()
+    # if rank == 0:
+    #     # pipe1()
+    #     pass
+
+    # elif rank == 1:
+    #     pass
+    #     # pipe2()
+    # pass

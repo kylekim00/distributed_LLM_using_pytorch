@@ -52,14 +52,6 @@ def main():
             torch_dtype=torch.float32,
             device='cpu'
         )
-        # def download_model(
-        #     repo_id: str = "unsloth/Llama-3.2-3B-Instruct",
-        #     local_dir: str = "./models/Llama-3.2-3B-Instruct",
-        #     output_dir: str = "./models/Llama-3.2-3B-Instruct-split",
-        #     split_idx: int = 14,
-        #     torch_dtype=torch.float32,
-        #     device: str = "cpu",
-        # ):
     else:
         run_main()
 
@@ -70,49 +62,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-# MAX_INFLIGHT = 4
-# N = 20
-
-# def pipe1():
-#     sender_queue = []
-#     for i in range(N):
-
-#         if len(sender_queue) >= MAX_INFLIGHT:
-#             req = sender_queue.pop(0)
-#             req.wait()                 #if finished, it will pop it. You don't need to handle this.
-#         x = torch.tensor([i])
-#         req = dist.isend(x, dst=1)
-#         sender_queue.append(req)
-
-#     for req in sender_queue:
-#         req.wait()
-
-
-
-
-
-
-# def pipe2():
-#     receiver_queue = []
-#     initial = min(MAX_INFLIGHT, N)
-
-#     #first give irecv to receive from queue asynchronously. Keep the queue size
-#     for _ in range(initial):
-#         buf = torch.empty(1, dtype=torch.long)
-#         req = dist.irecv(buf, src=0)
-#         receiver_queue.append((req, buf))
-
-#     received = 0
-#     while received < N:
-#         req, buf = receiver_queue.pop(0)
-#         req.wait()
-
-#         print(f"rank1 got {buf.item()}")
-#         received+=1
-
-#         if received + len(receiver_queue) < N:
-#             new_buf = torch.empty(1, dtype=torch.long)
-#             new_req = dist.irecv(new_buf, src=0)
-#             receiver_queue.append((new_req, new_buf))
 
