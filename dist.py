@@ -93,10 +93,10 @@ if rank == 0:
         out = recv_buf.get_next_tensor()
         print(f"result :{i} -> {out}")
         recv_buf.free_sent_tensor(out)
-        time.sleep(1)
+        # time.sleep(1)
 
-    recv_buf.close()
     send_buf.close()
+    recv_buf.close()
 
 
 elif rank == 1:
@@ -111,8 +111,8 @@ elif rank == 1:
         print(f"Node 1 -{out}-> Node 2")
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
-    recv_buf.close()
     send_buf.close()
+    recv_buf.close()
         
 
 elif rank == 2:
@@ -127,8 +127,8 @@ elif rank == 2:
         print(f"Node 2 -{out}-> Node 0")
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
-    recv_buf.close()
     send_buf.close()
+    recv_buf.close()
 
 
 
