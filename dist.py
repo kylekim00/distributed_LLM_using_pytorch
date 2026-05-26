@@ -31,12 +31,15 @@ class Buffer_Send:
         req = dist.isend(ten, self.target)
         self.pending_queue.append((req, ten))
 
-
-    def drain(self):
+    #this is called when end signal is sent by send_tensor.
+    def close(self):
+        for i in range(self.queue_size):
+            self.send_tensor(self.get_empty_tensor().fill_(-1))
         while self.pending_queue:
             req, ten = self.pending_queue.pop(0)
             req.wait()
             self.free_tensor.append(ten)
+        
         
 
 class Buffer_Recv:
@@ -65,10 +68,13 @@ class Buffer_Recv:
         res = dist.irecv(ten,src=self.target)
         self.pending_queue.append((res, ten))
 
-    def drain(self):
+    def close(self):
+        # for i in range(self.queue_size - len(self.pending_queue)):
+        #     self.free_sent_tensor(self.get_next_tensor())
+        #     pass
         while self.pending_queue:
             req, ten = self.pending_queue.pop(0)
-            # req.wait()
+            req.wait()
         
     
 tensor_dim = [1,1]
@@ -79,14 +85,18 @@ if rank == 0:
     recv_buf = Buffer_Recv(tensor_dim, 2)
     for i in range(10):
         ten = send_buf.get_empty_tensor()
+
         ten[0,0] = i
         print(f"Node 0 -{ten}-> Node 1")
+
         send_buf.send_tensor(ten=ten)
         out = recv_buf.get_next_tensor()
         print(f"result :{i} -> {out}")
         recv_buf.free_sent_tensor(out)
         time.sleep(1)
 
+    recv_buf.close()
+    send_buf.close()
 
 
 elif rank == 1:
@@ -101,8 +111,8 @@ elif rank == 1:
         print(f"Node 1 -{out}-> Node 2")
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
-    recv_buf.drain()
-    send_buf.drain()
+    recv_buf.close()
+    send_buf.close()
         
 
 elif rank == 2:
@@ -117,8 +127,8 @@ elif rank == 2:
         print(f"Node 2 -{out}-> Node 0")
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
-    recv_buf.drain()
-    send_buf.drain()
+    recv_buf.close()
+    send_buf.close()
 
 
 
