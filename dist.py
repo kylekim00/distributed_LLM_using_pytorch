@@ -46,7 +46,7 @@ class Buffer_Recv:
                  queue_size:int=4
                  ):
         self.pending_queue = list()
-        self.free_tensor = list()
+        # self.free_tensor = list()
         self.queue_size = queue_size
         self.target = target
         for _ in range(queue_size):#fill pending queue
@@ -61,14 +61,14 @@ class Buffer_Recv:
         return ten
 
     #when computation is done, it posts used tensor back to pending_queue
-    def free_tensor(self, ten:torch.Tensor)->None:
+    def free_sent_tensor(self, ten:torch.Tensor)->None:
         res = dist.irecv(ten,src=self.target)
         self.pending_queue.append((res, ten))
 
     def drain(self):
         while self.pending_queue:
             req, ten = self.pending_queue.pop(0)
-            req.wait()
+            # req.wait()
         
     
 tensor_dim = [1,1]
@@ -76,85 +76,109 @@ tensor_dim = [1,1]
     
 if rank == 0:
     send_buf = Buffer_Send(tensor_dim, 1)
+    recv_buf = Buffer_Recv(tensor_dim, 2)
     for i in range(10):
         ten = send_buf.get_empty_tensor()
         ten[0,0] = i
+        print(f"Node 0 -{ten}-> Node 1")
         send_buf.send_tensor(ten=ten)
-    
-    dist.barrier()
-    dist.destroy_process_group()
+        out = recv_buf.get_next_tensor()
+        print(f"result :{i} -> {out}")
+        recv_buf.free_sent_tensor(out)
+        time.sleep(1)
+
 
 
 elif rank == 1:
     recv_buf = Buffer_Recv(tensor_dim, 0)
     send_buf = Buffer_Send(tensor_dim, 2)
-    while True:
+    for _ in range(10):
         ten = recv_buf.get_next_tensor()
         out = send_buf.get_empty_tensor()
-        out = ten + 1
-        recv_buf.free_tensor(ten)
+        # out = ten + 1
+        # out.copy_(ten+1)
+        torch.add(ten, 1, out=out)
+        print(f"Node 1 -{out}-> Node 2")
+        recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
+    recv_buf.drain()
+    send_buf.drain()
         
 
 elif rank == 2:
-    while True:
+    recv_buf = Buffer_Recv(tensor_dim, 1)
+    send_buf = Buffer_Send(tensor_dim, 0)
+    for _ in range(10):
+        ten = recv_buf.get_next_tensor()
+        out = send_buf.get_empty_tensor()
+        # out = ten + 1
+        # out.copy_(ten+1)
+        torch.add(ten, 1, out=out)
+        print(f"Node 2 -{out}-> Node 0")
+        recv_buf.free_sent_tensor(ten)
+        send_buf.send_tensor(out)
+    recv_buf.drain()
+    send_buf.drain()
+
+
+
+dist.barrier()
+dist.destroy_process_group()
 
 
 
 
 
-
-
-if rank == 0:
-    ls = list()
-    free_buffer = [torch.empty([1,1]) for _ in range(4)]
-    weight = torch.tensor(3)
-    for i in range(10):
-       if len(ls) == 4:
-           req, ten = ls.pop(0)
-           req.wait()
-           free_buffer.append(ten)
+# if rank == 0:
+#     ls = list()
+#     free_buffer = [torch.empty([1,1]) for _ in range(4)]
+#     weight = torch.tensor(3)
+#     for i in range(10):
+#        if len(ls) == 4:
+#            req, ten = ls.pop(0)
+#            req.wait()
+#            free_buffer.append(ten)
            
-       ten = free_buffer.pop(0)
-       ten[0,0] = i
-       ls.append((dist.isend(ten, 1), ten))
-       time.sleep(0.8)
+#        ten = free_buffer.pop(0)
+#        ten[0,0] = i
+#        ls.append((dist.isend(ten, 1), ten))
+#        time.sleep(0.8)
 
-    for req, ten in ls:
-        req.wait()
-        free_buffer.append(ten)
+#     for req, ten in ls:
+#         req.wait()
+#         free_buffer.append(ten)
 
-    dist.barrier()
-    dist.destroy_process_group()
+#     dist.barrier()
+#     dist.destroy_process_group()
 
 
-elif rank==1:
-    ls = list()
-    free_buffer = [torch.empty([1, 1]) for _ in range(4)]
+# elif rank==1:
+#     ls = list()
+#     free_buffer = [torch.empty([1, 1]) for _ in range(4)]
 
-    for i in range(10):
-        if len(ls) == 4:
-            print("recv pending...")
-            res, ten = ls.pop(0)
-            res.wait()
-            # ten = buffer[0]
-            print(f"i : {ten} a : {ten} {len(ls)}")
-            free_buffer.append(ten)
+#     for i in range(10):
+#         if len(ls) == 4:
+#             print("recv pending...")
+#             res, ten = ls.pop(0)
+#             res.wait()
+#             # ten = buffer[0]
+#             print(f"i : {ten} a : {ten} {len(ls)}")
+#             free_buffer.append(ten)
             
 
-        ten = free_buffer.pop(0)
-        ls.append((dist.irecv(ten, 0), ten))
+#         ten = free_buffer.pop(0)
+#         ls.append((dist.irecv(ten, 0), ten))
 
         
 
-    for res, ten in ls:
-        res.wait()
-        print(f"i : {ten} a : {ten} {len(ls)}")
-        free_buffer.append(ten)
+#     for res, ten in ls:
+#         res.wait()
+#         print(f"i : {ten} a : {ten} {len(ls)}")
+#         free_buffer.append(ten)
 
 
-    dist.barrier()
-    dist.destroy_process_group()
+#     dist.barrier()
+#     dist.destroy_process_group()
         
     
 # import torch
