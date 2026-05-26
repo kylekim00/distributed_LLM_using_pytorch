@@ -1,15 +1,212 @@
 import torch
 import torch.distributed as dist
-
+import time
 dist.init_process_group('gloo')
 rank = dist.get_rank()
-a = torch.empty([1,1])
-if rank == 0:
-    
-    print(a)
-elif rank==1:
-    print(a)
 
+
+
+class Buffer_Send:
+    def __init__(self, 
+                 tensor_dim:list | torch.Size,
+                 target:int, 
+                 queue_size:int=4
+                ):
+        self.pending_queue = list()
+        self.target = target
+        self.free_tensor = [torch.empty(tensor_dim) for _ in range(queue_size)]
+        self.queue_size = queue_size
+
+    def get_empty_tensor(self):
+        if not self.free_tensor:
+            req, ten= self.pending_queue.pop(0)
+            req.wait()
+            self.free_tensor.append(ten)
+            
+        return self.free_tensor.pop(0)
+    
+
+
+    def send_tensor(self, ten:torch.Tensor):
+        req = dist.isend(ten, self.target)
+        self.pending_queue.append((req, ten))
+
+
+    def drain(self):
+        while self.pending_queue:
+            req, ten = self.pending_queue.pop(0)
+            req.wait()
+            self.free_tensor.append(ten)
+        
+
+class Buffer_Recv:
+    def __init__(self, 
+                 tensor_dim:list | torch.Size, 
+                 target:int=1, 
+                 queue_size:int=4
+                 ):
+        self.pending_queue = list()
+        self.free_tensor = list()
+        self.queue_size = queue_size
+        self.target = target
+        for _ in range(queue_size):#fill pending queue
+            ten = torch.empty(tensor_dim)
+            res = dist.irecv(ten, src=self.target)
+            self.pending_queue.append((res, ten))
+
+    #when starting computation, it gets the next tensor from pending queue to get data.
+    def get_next_tensor(self)->torch.Tensor:
+        res, ten = self.pending_queue.pop(0)
+        res.wait()
+        return ten
+
+    #when computation is done, it posts used tensor back to pending_queue
+    def free_tensor(self, ten:torch.Tensor)->None:
+        res = dist.irecv(ten,src=self.target)
+        self.pending_queue.append((res, ten))
+
+    def drain(self):
+        while self.pending_queue:
+            req, ten = self.pending_queue.pop(0)
+            req.wait()
+        
+    
+tensor_dim = [1,1]
+
+    
+if rank == 0:
+    send_buf = Buffer_Send(tensor_dim, 1)
+    for i in range(10):
+        ten = send_buf.get_empty_tensor()
+        ten[0,0] = i
+        send_buf.send_tensor(ten=ten)
+    
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+elif rank == 1:
+    recv_buf = Buffer_Recv(tensor_dim, 0)
+    send_buf = Buffer_Send(tensor_dim, 2)
+    while True:
+        ten = recv_buf.get_next_tensor()
+        out = send_buf.get_empty_tensor()
+        out = ten + 1
+        recv_buf.free_tensor(ten)
+        send_buf.send_tensor(out)
+        
+
+elif rank == 2:
+    while True:
+
+
+
+
+
+
+
+if rank == 0:
+    ls = list()
+    free_buffer = [torch.empty([1,1]) for _ in range(4)]
+    weight = torch.tensor(3)
+    for i in range(10):
+       if len(ls) == 4:
+           req, ten = ls.pop(0)
+           req.wait()
+           free_buffer.append(ten)
+           
+       ten = free_buffer.pop(0)
+       ten[0,0] = i
+       ls.append((dist.isend(ten, 1), ten))
+       time.sleep(0.8)
+
+    for req, ten in ls:
+        req.wait()
+        free_buffer.append(ten)
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+elif rank==1:
+    ls = list()
+    free_buffer = [torch.empty([1, 1]) for _ in range(4)]
+
+    for i in range(10):
+        if len(ls) == 4:
+            print("recv pending...")
+            res, ten = ls.pop(0)
+            res.wait()
+            # ten = buffer[0]
+            print(f"i : {ten} a : {ten} {len(ls)}")
+            free_buffer.append(ten)
+            
+
+        ten = free_buffer.pop(0)
+        ls.append((dist.irecv(ten, 0), ten))
+
+        
+
+    for res, ten in ls:
+        res.wait()
+        print(f"i : {ten} a : {ten} {len(ls)}")
+        free_buffer.append(ten)
+
+
+    dist.barrier()
+    dist.destroy_process_group()
+        
+    
+# import torch
+# import torch.distributed as dist
+# import time
+# dist.init_process_group('gloo')
+# rank = dist.get_rank()
+# # a = torch.empty([1,1])
+# if rank == 0:
+#     ls = list()
+#     buffer = [torch.empty([1,1]) for _ in range(4)]
+
+#     for i in range(10):
+#        if len(ls) == 4:
+#            ls.pop(0).wait()
+           
+#        ten = buffer.pop(0)
+#        ten[0,0] = i
+#        ls.append(dist.isend(ten, 1))
+       
+#        buffer.append(ten)
+#     for req in ls:
+#         req.wait()
+
+#     dist.barrier()
+#     dist.destroy_process_group()
+
+
+# elif rank==1:
+#     ls = list()
+#     buffer = [torch.empty([1, 1]) for _ in range(4)]
+
+#     for i in range(10):
+#         if len(ls) == 4:
+#             print("recv pending...")
+#             ls.pop(0).wait()
+#             ten = buffer[0]
+#             print(f"i : {ten} a : {ten} {len(ls)}")
+            
+
+#         ten = buffer.pop(0)
+#         ls.append(dist.irecv(ten, 0))
+#         buffer.append(ten)
+#         time.sleep(1)
+#     for res in ls:
+#         res.wait()
+#         ten = buffer.pop(0)
+#         print(f"i : {ten} a : {ten} {len(ls)}")
+
+
+#     dist.barrier()
+#     dist.destroy_process_group()
 
 # MAX_INFLIGHT = 4
 # N = 20
