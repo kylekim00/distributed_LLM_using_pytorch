@@ -10,7 +10,7 @@ class Buffer_Send:
     def __init__(self, 
                  tensor_dim:list | torch.Size,
                  target:int, 
-                 queue_size:int=4
+                 queue_size:int=1
                 ):
         self.pending_queue = list()
         self.target = target
@@ -46,7 +46,7 @@ class Buffer_Recv:
     def __init__(self, 
                  tensor_dim:list | torch.Size, 
                  target:int=1, 
-                 queue_size:int=4
+                 queue_size:int=1
                  ):
         self.pending_queue = list()
         # self.free_tensor = list()
