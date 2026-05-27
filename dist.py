@@ -108,7 +108,7 @@ if rank == 0:
         recv_control.free_sent_tensor(r_ctl)
         recv_buf.free_sent_tensor(out)
         # time.sleep(1)
-        
+
     send_control.close()
     recv_control.close()
     send_buf.close()
@@ -155,7 +155,6 @@ elif rank == 2:
     recv_control = Buffer_Recv(control_dim, 1)
     send_control = Buffer_Send(control_dim, 0)
 
-    #TODO set buffer, recv buffer, config buffer, send buffer.
 
     recv_buf = Buffer_Recv(buffer_dim, 1)
     send_buf = Buffer_Send(buffer_dim, 0)
