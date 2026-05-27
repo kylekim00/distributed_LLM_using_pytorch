@@ -6,11 +6,12 @@ rank = dist.get_rank()
 
 
 
+
 class Buffer_Send:
     def __init__(self, 
                  tensor_dim:list | torch.Size,
                  target:int, 
-                 queue_size:int=1
+                 queue_size:int=4
                 ):
         self.pending_queue = list()
         self.target = target
@@ -46,7 +47,7 @@ class Buffer_Recv:
     def __init__(self, 
                  tensor_dim:list | torch.Size, 
                  target:int=1, 
-                 queue_size:int=1
+                 queue_size:int=4
                  ):
         self.pending_queue = list()
         # self.free_tensor = list()
@@ -76,57 +77,109 @@ class Buffer_Recv:
             req, ten = self.pending_queue.pop(0)
             req.wait()
         
-    
-tensor_dim = [1,1]
+control_dim = [1,1]
+buffer_dim = [1,1]
 
     
 if rank == 0:
-    send_buf = Buffer_Send(tensor_dim, 1)
-    recv_buf = Buffer_Recv(tensor_dim, 2)
+    send_control = Buffer_Send(control_dim, 1)
+    recv_control = Buffer_Recv(control_dim, 2)
+    
+    send_buf = Buffer_Send(buffer_dim, 1)
+    recv_buf = Buffer_Recv(buffer_dim, 2)
+
     for i in range(10):
+        s_ctl = send_control.get_empty_tensor()
         ten = send_buf.get_empty_tensor()
 
+        s_ctl[0,0] = 0 if i<9 else 1
         ten[0,0] = i
         print(f"Node 0 -{ten}-> Node 1")
 
+        send_control.send_tensor(ten=s_ctl)
         send_buf.send_tensor(ten=ten)
+#-----------------------------------------------------
+        r_ctl = recv_control.get_next_tensor()
         out = recv_buf.get_next_tensor()
-        print(f"result :{i} -> {out}")
+
+        suffix = " | end!" if r_ctl[0,0].item() == 1 else ""
+        print(f"result :{i} -> {out}{suffix}")
+
+        recv_control.free_sent_tensor(r_ctl)
         recv_buf.free_sent_tensor(out)
         # time.sleep(1)
-
+        
+    send_control.close()
+    recv_control.close()
     send_buf.close()
     recv_buf.close()
 
 
 elif rank == 1:
-    recv_buf = Buffer_Recv(tensor_dim, 0)
-    send_buf = Buffer_Send(tensor_dim, 2)
-    for _ in range(10):
-        ten = recv_buf.get_next_tensor()
-        out = send_buf.get_empty_tensor()
-        # out = ten + 1
-        # out.copy_(ten+1)
+    #bring control buffer 
+    recv_control = Buffer_Recv(control_dim, 0)
+    send_control = Buffer_Send(control_dim, 2)
+    recv_buf = Buffer_Recv(buffer_dim, 0)
+    send_buf = Buffer_Send(buffer_dim, 2)
+    tmp = True
+    while tmp:
+        #get control and space & config
+        r_ctl = recv_control.get_next_tensor()
+        s_ctl = send_control.get_empty_tensor()
+        if r_ctl[0,0] == 1:
+            tmp = False
+        s_ctl.copy_(r_ctl)
+        recv_control.free_sent_tensor(r_ctl)
+        send_control.send_tensor(s_ctl)
+        
+        #get data and space
+        ten = recv_buf.get_next_tensor()#get next data
+        out = send_buf.get_empty_tensor()#get empty to fill out and send
+
         torch.add(ten, 1, out=out)
         print(f"Node 1 -{out}-> Node 2")
+
+        #send and free space
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
+    
+
+    send_control.close()
+    recv_control.close()
+
     send_buf.close()
     recv_buf.close()
         
 
 elif rank == 2:
-    recv_buf = Buffer_Recv(tensor_dim, 1)
-    send_buf = Buffer_Send(tensor_dim, 0)
-    for _ in range(10):
+    recv_control = Buffer_Recv(control_dim, 1)
+    send_control = Buffer_Send(control_dim, 0)
+
+    #TODO set buffer, recv buffer, config buffer, send buffer.
+
+    recv_buf = Buffer_Recv(buffer_dim, 1)
+    send_buf = Buffer_Send(buffer_dim, 0)
+    tmp = True
+    while tmp:
+        s_ctl = send_control.get_empty_tensor()
+        r_ctl = recv_control.get_next_tensor()
+
+        if r_ctl[0,0] == 1:
+            tmp = False
+        s_ctl.copy_(r_ctl)
+        recv_control.free_sent_tensor(r_ctl)
+        send_control.send_tensor(s_ctl)
+
+
         ten = recv_buf.get_next_tensor()
         out = send_buf.get_empty_tensor()
-        # out = ten + 1
-        # out.copy_(ten+1)
         torch.add(ten, 1, out=out)
         print(f"Node 2 -{out}-> Node 0")
         recv_buf.free_sent_tensor(ten)
         send_buf.send_tensor(out)
+
+    send_control.close()
+    recv_control.close()
     send_buf.close()
     recv_buf.close()
 
