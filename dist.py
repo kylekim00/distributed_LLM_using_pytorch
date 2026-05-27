@@ -11,10 +11,12 @@ class Buffer_Send:
     def __init__(self, 
                  tensor_dim:list | torch.Size,
                  target:int, 
-                 queue_size:int=4
+                 tag:int,
+                 queue_size:int=4,
                 ):
         self.pending_queue = list()
         self.target = target
+        self.tag = tag
         self.free_tensor = [torch.empty(tensor_dim) for _ in range(queue_size)]
         self.queue_size = queue_size
 
@@ -29,7 +31,7 @@ class Buffer_Send:
 
 
     def send_tensor(self, ten:torch.Tensor):
-        req = dist.isend(ten, self.target)
+        req = dist.isend(ten, self.target, tag=self.tag)
         self.pending_queue.append((req, ten))
 
     #this is called when end signal is sent by send_tensor.
@@ -46,16 +48,17 @@ class Buffer_Send:
 class Buffer_Recv:
     def __init__(self, 
                  tensor_dim:list | torch.Size, 
-                 target:int=1, 
+                 target:int,
+                 tag:int, 
                  queue_size:int=4
                  ):
         self.pending_queue = list()
-        # self.free_tensor = list()
+        self.tag = tag
         self.queue_size = queue_size
         self.target = target
         for _ in range(queue_size):#fill pending queue
             ten = torch.empty(tensor_dim)
-            res = dist.irecv(ten, src=self.target)
+            res = dist.irecv(ten, src=self.target, tag=self.tag)
             self.pending_queue.append((res, ten))
 
     #when starting computation, it gets the next tensor from pending queue to get data.
@@ -66,7 +69,7 @@ class Buffer_Recv:
 
     #when computation is done, it posts used tensor back to pending_queue
     def free_sent_tensor(self, ten:torch.Tensor)->None:
-        res = dist.irecv(ten,src=self.target)
+        res = dist.irecv(ten,src=self.target, tag=self.tag)
         self.pending_queue.append((res, ten))
 
     def close(self):
@@ -82,11 +85,11 @@ buffer_dim = [1,1]
 
     
 if rank == 0:
-    send_control = Buffer_Send(control_dim, 1)
-    recv_control = Buffer_Recv(control_dim, 2)
+    send_control = Buffer_Send(control_dim, 1, 1)
+    recv_control = Buffer_Recv(control_dim, 2, 1)
     
-    send_buf = Buffer_Send(buffer_dim, 1)
-    recv_buf = Buffer_Recv(buffer_dim, 2)
+    send_buf = Buffer_Send(buffer_dim, 1, 0)
+    recv_buf = Buffer_Recv(buffer_dim, 2, 0)
 
     for i in range(10):
         s_ctl = send_control.get_empty_tensor()
@@ -117,10 +120,10 @@ if rank == 0:
 
 elif rank == 1:
     #bring control buffer 
-    recv_control = Buffer_Recv(control_dim, 0)
-    send_control = Buffer_Send(control_dim, 2)
-    recv_buf = Buffer_Recv(buffer_dim, 0)
-    send_buf = Buffer_Send(buffer_dim, 2)
+    recv_control = Buffer_Recv(control_dim, 0, 1)
+    send_control = Buffer_Send(control_dim, 2, 1)
+    recv_buf = Buffer_Recv(buffer_dim, 0, 0)
+    send_buf = Buffer_Send(buffer_dim, 2, 0)
     tmp = True
     while tmp:
         #get control and space & config
@@ -152,12 +155,12 @@ elif rank == 1:
         
 
 elif rank == 2:
-    recv_control = Buffer_Recv(control_dim, 1)
-    send_control = Buffer_Send(control_dim, 0)
+    recv_control = Buffer_Recv(control_dim, 1, 1)
+    send_control = Buffer_Send(control_dim, 0, 1)
 
 
-    recv_buf = Buffer_Recv(buffer_dim, 1)
-    send_buf = Buffer_Send(buffer_dim, 0)
+    recv_buf = Buffer_Recv(buffer_dim, 1, 0)
+    send_buf = Buffer_Send(buffer_dim, 0, 0)
     tmp = True
     while tmp:
         s_ctl = send_control.get_empty_tensor()
