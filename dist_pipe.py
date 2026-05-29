@@ -1,8 +1,7 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import time
-from functools import wraps
+
 
 dist.init_process_group('gloo')
 rank = dist.get_rank()
@@ -88,10 +87,11 @@ class PipeSender:
             data_dim:list | torch.Size, 
             control_dim:list | torch.Size, 
             control_queue_size:int, 
-            data_queue_size:int
+            data_queue_size:int,
+            pipe_tag=0
             ):
-        self.control = Buffer_Send(control_dim, destination, tag=1, queue_size=control_queue_size)
-        self.data = Buffer_Send(data_dim, destination, tag=0, queue_size=data_queue_size)
+        self.control = Buffer_Send(control_dim, destination, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
+        self.data = Buffer_Send(data_dim, destination, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
 
     def getBuffer(self)->tuple:
         return self.control.get_empty_tensor(), self.data.get_empty_tensor()
@@ -112,10 +112,11 @@ class PipeReceiver:
             control_dim:list, 
             data_dim:list|torch.Size, 
             control_queue_size:int=4, 
-            data_queue_size:int=4
+            data_queue_size:int=4,
+            pipe_tag=0
             ):
-        self.control = Buffer_Recv(control_dim, source, tag=1, queue_size=control_queue_size)
-        self.data = Buffer_Recv(data_dim, source, tag=0, queue_size=data_queue_size)
+        self.control = Buffer_Recv(control_dim, source, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
+        self.data = Buffer_Recv(data_dim, source, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
     
     def recv(self)->list:
         return self.control.get_next_tensor(), self.data.get_next_tensor()
