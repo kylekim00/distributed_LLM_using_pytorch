@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-
 from .pipe import PipeReceiver, PipeSender
 
 
@@ -82,3 +81,6 @@ class FullNode:
         
         self.send.close()
         self.recv.close()
+
+class PromptNode:
+    

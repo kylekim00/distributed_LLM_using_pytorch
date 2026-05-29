@@ -6,7 +6,8 @@ from safetensors.torch import load_file
 from .parser import MyParser
 from .download import download_model
 from .division_model import Model1, Model2
-
+from .pipe import PipeReceiver, PipeSender
+from .node import FullNode
 
 
 def load_model1(
@@ -35,15 +36,10 @@ def load_model2(
     model2.eval()
     return model2
 
-def _send_tensor(tensor:torch.tensor, dst:int):
-    pass
 
-def _recv_tensor(tensor:torch.tensor, src:int):
-    
 
 def run_dist(
-        input_dir: str="./models/Llama-3.2-3B-Instruct-split"
-
+    
 ):
     pass
 

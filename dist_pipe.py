@@ -214,6 +214,23 @@ class FullNode:
         self.send.close()
         self.recv.close()
 
+
+
+
+class PromptNode:
+    def __init__(
+            self,
+            model:nn.Module|None,
+            receiving_node:int,
+            receiving_dim:list|torch.Size
+
+        ):
+
+        pass
+
+
+
+
 class AddOne(nn.Module):
     def forward(self, x):
         return x + 1
