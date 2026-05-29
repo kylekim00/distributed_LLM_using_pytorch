@@ -191,8 +191,7 @@ class FullNode:
         tmp = True
 
         while tmp:
-            # r_ctl = self.recv_control.get_next_tensor()
-            # s_ctl = self.send_control.get_empty_tensor()
+
             r_ctl, r_ten = self.recv.recv()
             s_ctl, s_ten = self.send.getBuffer()
 
@@ -205,6 +204,8 @@ class FullNode:
             with torch.no_grad():
                 out_ = self.model(r_ten)
                 s_ten.copy_(out_) #this part should be moderated.(as well as other buffers)
+
+            
             self.recv.release(r_ctl, r_ten)
             self.send.send(s_ctl, s_ten)
 
@@ -223,37 +224,53 @@ buffer_dim = [1,1]
 
 
 if rank == 0:
-    send_control = Buffer_Send(control_dim, 1, 1)
-    recv_control = Buffer_Recv(control_dim, 2, 1)
+    send = PipeSender(
+        destination=1,
+        data_dim=buffer_dim,
+        control_dim=control_dim,
+        control_queue_size=4,
+        data_queue_size=4
+    )
+    # send_control = Buffer_Send(control_dim, 1, 1)
+    # send_buf = Buffer_Send(buffer_dim, 1, 0)
+
+    recv = PipeReceiver(
+        source=2,
+        data_dim=buffer_dim,
+        control_dim=control_dim,
+        control_queue_size=4,
+        data_queue_size=4
+    )
     
-    send_buf = Buffer_Send(buffer_dim, 1, 0)
-    recv_buf = Buffer_Recv(buffer_dim, 2, 0)
+    # recv_control = Buffer_Recv(control_dim, 2, 1)
+    # recv_buf = Buffer_Recv(buffer_dim, 2, 0)
 
     for i in range(10):
-        s_ctl = send_control.get_empty_tensor()
-        ten = send_buf.get_empty_tensor()
+        # s_ctl = send_control.get_empty_tensor()
+        # ten = send_buf.get_empty_tensor()
+
+        s_ctl, s_ten = send.getBuffer()
+
 
         s_ctl[0] = 0 if i<9 else 1
-        ten[0,0] = i
-        print(f"Node 0 -{ten}-> Node 1")
+        s_ten[0,0] = i
+        print(f"Node 0 -{s_ten.item()}-> Node 1")
 
-        send_control.send_tensor(ten=s_ctl)
-        send_buf.send_tensor(ten=ten)
+        send.send(s_ctl, s_ten)
 #-----------------------------------------------------
-        r_ctl = recv_control.get_next_tensor()
-        out = recv_buf.get_next_tensor()
+        # r_ctl = recv_control.get_next_tensor()
+        # out = recv_buf.get_next_tensor()
+        
+        r_ctl, r_ten = recv.recv()
 
         suffix = " | end!" if r_ctl[0].item() == 1 else ""
-        print(f"result :{i} -> {out}{suffix}")
+        print(f"result :{i} -> {r_ten.item()}{suffix}")
 
-        recv_control.free_sent_tensor(r_ctl)
-        recv_buf.free_sent_tensor(out)
+        recv.release(r_ctl, r_ten)
         # time.sleep(1)
 
-    send_control.close()
-    recv_control.close()
-    send_buf.close()
-    recv_buf.close()
+    send.close()
+    recv.close()
 
 
 elif rank == 1:
