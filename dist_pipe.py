@@ -81,6 +81,57 @@ class Buffer_Recv:
             req, _ = self.pending_queue.pop(0)
             req.wait()
 
+class PipeSender:
+    def __init__(
+            self, 
+            destination:int, 
+            data_dim:list | torch.Size, 
+            control_dim:list | torch.Size, 
+            control_queue_size:int, 
+            data_queue_size:int
+            ):
+        self.control = Buffer_Send(control_dim, destination, tag=1, queue_size=control_queue_size)
+        self.data = Buffer_Send(data_dim, destination, tag=0, queue_size=data_queue_size)
+
+    def getBuffer(self)->tuple:
+        return self.control.get_empty_tensor(), self.data.get_empty_tensor()
+
+    def send(self, ctl:torch.Tensor, data:torch.Tensor)->None:
+        self.control.send_tensor(ctl)
+        self.data.send_tensor(data)
+
+    def close(self)->None:
+        self.control.close()
+        self.data.close()
+
+
+class PipeReceiver:
+    def __init__(
+            self, 
+            source:int, 
+            control_dim:list, 
+            data_dim:list|torch.Size, 
+            control_queue_size:int=4, 
+            data_queue_size:int=4
+            ):
+        self.control = Buffer_Recv(control_dim, source, tag=1, queue_size=control_queue_size)
+        self.data = Buffer_Recv(data_dim, source, tag=0, queue_size=data_queue_size)
+    
+    def recv(self)->list:
+        return self.control.get_next_tensor(), self.data.get_next_tensor()
+
+    def release(self, ctl:torch.Tensor, data:torch.Tensor):
+        self.control.free_sent_tensor(ctl)
+        self.data.free_sent_tensor(data)
+    
+    def close(self):
+        self.control.close()
+        self.data.close()
+
+
+
+
+
 
 
 #.copy_() version 
@@ -97,21 +148,35 @@ class FullNode:
 
         self.model = model
 
-        self.send_control = None
-        self.send_buffer = None
-        self.recv_control = None
-        self.recv_buffer = None
+        # self.send_control = None
+        # self.send_buffer = None
+        # self.recv_control = None
+        # self.recv_buffer = None
 
         self.control_config = control_config.copy()
         control_dim = [len(control_config)] 
 
+        self.send = PipeSender(
+            destination=sending_node,
+            data_dim=sending_dim,
+            control_dim=control_dim,
+            control_queue_size=queue_size,
+            data_queue_size=queue_size
+        )
+        self.recv = PipeReceiver(
+            source=receiving_node,
+            control_dim=control_dim,
+            data_dim= receiving_dim,
+            control_queue_size=queue_size,
+            data_queue_size=queue_size
+        )
         
-        self.send_control = Buffer_Send(control_dim, sending_node, 1, queue_size)
-        self.send_buffer = Buffer_Send(sending_dim, sending_node, 0, queue_size)
+        # self.send_control = Buffer_Send(control_dim, sending_node, 1, queue_size)
+        # self.send_buffer = Buffer_Send(sending_dim, sending_node, 0, queue_size)
 
     
-        self.recv_control = Buffer_Recv(control_dim, receiving_node, 1, queue_size)
-        self.recv_buffer = Buffer_Recv(receiving_dim, receiving_node, 0, queue_size)
+        # self.recv_control = Buffer_Recv(control_dim, receiving_node, 1, queue_size)
+        # self.recv_buffer = Buffer_Recv(receiving_dim, receiving_node, 0, queue_size)
 
     def _configDecoder(self, control_buffer:torch.Tensor)->dict:
         for inx, key in enumerate(self.control_config.keys()):
@@ -126,29 +191,26 @@ class FullNode:
         tmp = True
 
         while tmp:
-            r_ctl = self.recv_control.get_next_tensor()
-            s_ctl = self.send_control.get_empty_tensor()
+            # r_ctl = self.recv_control.get_next_tensor()
+            # s_ctl = self.send_control.get_empty_tensor()
+            r_ctl, r_ten = self.recv.recv()
+            s_ctl, s_ten = self.send.getBuffer()
 
-            
             if self._configDecoder(r_ctl)['end'] == 1:
                 tmp = False
+
             s_ctl.copy_(r_ctl)
-            self.recv_control.free_sent_tensor(r_ctl)
 
-            ten = self.recv_buffer.get_next_tensor()
-            out = self.send_buffer.get_empty_tensor()
-            with torch.no_grad():
-                out_ = self.model(ten)
-                out.copy_(out_) #this part should be moderated.(as well as other buffers)
-            self.recv_buffer.free_sent_tensor(ten)
-            self.send_control.send_tensor(s_ctl)
-            self.send_buffer.send_tensor(out)
         
-        self.send_control.close()
-        self.recv_control.close()
+            with torch.no_grad():
+                out_ = self.model(r_ten)
+                s_ten.copy_(out_) #this part should be moderated.(as well as other buffers)
+            self.recv.release(r_ctl, r_ten)
+            self.send.send(s_ctl, s_ten)
 
-        self.send_buffer.close()
-        self.recv_buffer.close()
+        
+        self.send.close()
+        self.recv.close()
 
 class AddOne(nn.Module):
     def forward(self, x):
