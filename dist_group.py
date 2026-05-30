@@ -234,6 +234,17 @@ class FullNode:
                 raise ValueError(f"control_config{key} must be int, got {type(value)}")
         
         control_dim = [len(self.control_config)] 
+
+
+        #this nccl keeps getting problemssssssssss!!!!!!!!!
+        recv_queue_size = queue_size
+        send_queue_size = queue_size
+
+        if recv_data_group is not None:
+            recv_queue_size = 1
+        if send_data_group is not None:
+            send_queue_size = 1
+
         
         #control set to CPU for now
         self.send = PipeSender(
@@ -241,7 +252,7 @@ class FullNode:
             data_dim=sending_dim,
             control_dim=control_dim,
             control_queue_size=queue_size,
-            data_queue_size=queue_size,
+            data_queue_size=send_queue_size,
             control_group=None,
             data_group=send_data_group,
             control_device="cpu",
@@ -255,7 +266,7 @@ class FullNode:
             control_dim=control_dim,
             data_dim=receiving_dim,
             control_queue_size=queue_size,
-            data_queue_size=queue_size,
+            data_queue_size=recv_queue_size,
             control_group=None,
             data_group=recv_data_group,
             control_device="cpu",
@@ -264,12 +275,7 @@ class FullNode:
             data_dtype=data_dtype,
         )
         
-        # self.send_control = Buffer_Send(control_dim, sending_node, 1, queue_size)
-        # self.send_buffer = Buffer_Send(sending_dim, sending_node, 0, queue_size)
-
-    
-        # self.recv_control = Buffer_Recv(control_dim, receiving_node, 1, queue_size)
-        # self.recv_buffer = Buffer_Recv(receiving_dim, receiving_node, 0, queue_size)
+        
 
     def _configDecoder(self, control_buffer:torch.Tensor)->dict:
         for inx, key in enumerate(self.control_config.keys()):
@@ -295,7 +301,7 @@ class FullNode:
 
         
             with torch.no_grad():
-                inp = r_ten.to(self.model.device)
+                inp = r_ten.to(self.model_device)
                 out_ = self.model(inp)
                 s_ten.copy_(out_.to(s_ten.device)) #this part should be moderated.(as well as other buffers)
 
