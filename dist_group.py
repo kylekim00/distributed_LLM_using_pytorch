@@ -9,13 +9,18 @@ class Buffer_Send:
                  tensor_dim:list | torch.Size,
                  target:int, 
                  tag:int,
+                 group:dist.ProcessGroup|None=None,
+                 device:str='cpu',
+                 dtype:torch.dtype=torch.float32,
                  queue_size:int=4,
                 ):
         self.pending_queue = list()
         self.target = target
         self.tag = tag
-        self.free_tensor = [torch.empty(tensor_dim) for _ in range(queue_size)]
+        self.free_tensor = [torch.empty(size=tensor_dim, dtype=dtype, device=device) for _ in range(queue_size)]
+        self.group = group
         self.queue_size = queue_size
+
 
     def get_empty_tensor(self):
         if not self.free_tensor:
@@ -28,7 +33,7 @@ class Buffer_Send:
 
 
     def send_tensor(self, ten:torch.Tensor):
-        req = dist.isend(ten, self.target, tag=self.tag)
+        req = dist.isend(tensor=ten, dst=self.target, tag=self.tag, group=self.group)
         self.pending_queue.append((req, ten))
 
     #this is called when end signal is sent by send_tensor.
@@ -47,15 +52,19 @@ class Buffer_Recv:
                  tensor_dim:list | torch.Size, 
                  target:int,
                  tag:int, 
+                 group:dist.ProcessGroup|None=None,
+                 device:str='cpu',
+                 dtype:torch.dtype=torch.float32,
                  queue_size:int=4
                  ):
         self.pending_queue = list()
-        self.tag = tag
-        self.queue_size = queue_size
         self.target = target
+        self.tag = tag
+        self.group = group
+        self.queue_size = queue_size
         for _ in range(queue_size):#fill pending queue
-            ten = torch.empty(tensor_dim)
-            res = dist.irecv(ten, src=self.target, tag=self.tag)
+            ten = torch.empty(size=tensor_dim, dtype=dtype, device=device)
+            res = dist.irecv(ten, src=self.target, tag=self.tag, group=group)
             self.pending_queue.append((res, ten))
 
     #when starting computation, it gets the next tensor from pending queue to get data.
@@ -66,7 +75,7 @@ class Buffer_Recv:
 
     #when computation is done, it posts used tensor back to pending_queue
     def free_sent_tensor(self, ten:torch.Tensor)->None:
-        res = dist.irecv(ten,src=self.target, tag=self.tag)
+        res = dist.irecv(ten,src=self.target, tag=self.tag, group=self.group)
         self.pending_queue.append((res, ten))
 
     def close(self):
@@ -85,12 +94,38 @@ class PipeSender:
             control_dim:list | torch.Size, 
             control_queue_size:int, 
             data_queue_size:int,
-            pipe_tag=0
-            ):
-        self.control = Buffer_Send(control_dim, destination, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
-        self.data = Buffer_Send(data_dim, destination, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
+            pipe_tag:int=0,                 #if connecting same node, then it should have a different pipe.
 
-    def getBuffer(self)->tuple:
+            control_group:dist.ProcessGroup|None = None,
+            data_group:dist.ProcessGroup|None = None,
+            
+            control_device:str="cpu",
+            data_device:str="cpu",
+
+            control_dtype:torch.dtype = torch.int32,
+            data_dtype:torch.dtype = torch.float32
+
+            ):
+        self.control = Buffer_Send(
+            tensor_dim=control_dim, 
+            target=destination, 
+            tag=pipe_tag*2 + 1, 
+            group=control_group,
+            device=control_device,
+            dtype=control_dtype,
+            queue_size=control_queue_size
+            )
+        self.data = Buffer_Send(
+            tensor_dim=data_dim, 
+            target=destination, 
+            tag=pipe_tag*2 + 0, 
+            group=data_group,
+            device=data_device,
+            dtype=data_dtype,
+            queue_size=data_queue_size
+            )
+
+    def getBuffer(self)->tuple[torch.Tensor, torch.Tensor]:
         return self.control.get_empty_tensor(), self.data.get_empty_tensor()
 
     def send(self, ctl:torch.Tensor, data:torch.Tensor)->None:
@@ -110,12 +145,39 @@ class PipeReceiver:
             data_dim:list|torch.Size, 
             control_queue_size:int=4, 
             data_queue_size:int=4,
-            pipe_tag=0
+            pipe_tag=0,
+
+            control_group:dist.ProcessGroup | None=None,
+            data_group:dist.ProcessGroup | None = None,
+
+            control_device:str = 'cpu',
+            data_device:str = "cpu",
+
+            control_dtype:torch.dtype = torch.int32,
+            data_dtype:torch.dtype = torch.float32
             ):
-        self.control = Buffer_Recv(control_dim, source, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
-        self.data = Buffer_Recv(data_dim, source, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
+        
+        self.control = Buffer_Recv(
+            tensor_dim=control_dim,
+            target=source,
+            tag=pipe_tag * 2 + 1,
+            group=control_group,
+            device=control_device,
+            dtype=control_dtype,
+            queue_size=control_queue_size,
+        )
+
+        self.data = Buffer_Recv(
+            tensor_dim=data_dim,
+            target=source,
+            tag=pipe_tag * 2 + 0,
+            group=data_group,
+            device=data_device,
+            dtype=data_dtype,
+            queue_size=data_queue_size,
+        )
     
-    def recv(self)->list:
+    def recv(self)->tuple[torch.Tensor, torch.Tensor]:
         return self.control.get_next_tensor(), self.data.get_next_tensor()
 
     def release(self, ctl:torch.Tensor, data:torch.Tensor):
@@ -136,37 +198,70 @@ class PipeReceiver:
 class FullNode:
     def __init__(self,
         model: nn.Module,
+        
         receiving_node: int,
         receiving_dim: list | torch.Size,
+
         sending_node: int,
         sending_dim: list | torch.Size,
-        control_config: dict = {'end':0},
+        
+        control_config: dict | None = None,
         queue_size: int = 4,
+        
+        recv_data_group:dist.ProcessGroup | None = None,
+        send_data_group:dist.ProcessGroup | None = None,
+        
+        recv_data_device: str = "cpu",
+        send_data_device:str = "cpu",
+        model_device:str = "cpu",
+        
+        data_dtype: torch.dtype = torch.float32
     ):
 
-        self.model = model
+        self.model = model.to(model_device)
+        self.model_device = model_device
 
-        # self.send_control = None
-        # self.send_buffer = None
-        # self.recv_control = None
-        # self.recv_buffer = None
 
+        #chekc control config
+        if control_config is None:
+            control_config = dict()
+            
         self.control_config = control_config.copy()
-        control_dim = [len(control_config)] 
+        self.control_config['end'] = 0
 
+        for key, value in self.control_config.items():
+            if not isinstance(value, int):
+                raise ValueError(f"control_config{key} must be int, got {type(value)}")
+        
+        control_dim = [len(self.control_config)] 
+        
+        #control set to CPU for now
         self.send = PipeSender(
             destination=sending_node,
             data_dim=sending_dim,
             control_dim=control_dim,
             control_queue_size=queue_size,
-            data_queue_size=queue_size
+            data_queue_size=queue_size,
+            control_group=None,
+            data_group=send_data_group,
+            control_device="cpu",
+            data_device=send_data_device,
+            control_dtype=torch.int32,
+            data_dtype=data_dtype,
         )
+
         self.recv = PipeReceiver(
             source=receiving_node,
             control_dim=control_dim,
-            data_dim= receiving_dim,
+            data_dim=receiving_dim,
             control_queue_size=queue_size,
-            data_queue_size=queue_size
+            data_queue_size=queue_size,
+            control_group=None,
+            data_group=recv_data_group,
+            control_device="cpu",
+            data_device=recv_data_device,
+            control_dtype=torch.int32,
+            data_dtype=data_dtype,
         )
         
         # self.send_control = Buffer_Send(control_dim, sending_node, 1, queue_size)
@@ -178,7 +273,7 @@ class FullNode:
 
     def _configDecoder(self, control_buffer:torch.Tensor)->dict:
         for inx, key in enumerate(self.control_config.keys()):
-            self.control_config[key] = control_buffer[inx]
+            self.control_config[key] = int(control_buffer[inx].item())
         return self.control_config
     
     # def _configEncoder(self)->torch.Tensor:
@@ -186,22 +281,23 @@ class FullNode:
     
 
     def run(self)->None:
-        tmp = True
+        running = True
 
-        while tmp:
+        while running:
 
             r_ctl, r_ten = self.recv.recv()
             s_ctl, s_ten = self.send.getBuffer()
 
             if self._configDecoder(r_ctl)['end'] == 1:
-                tmp = False
+                running = False
 
             s_ctl.copy_(r_ctl)
 
         
             with torch.no_grad():
-                out_ = self.model(r_ten)
-                s_ten.copy_(out_) #this part should be moderated.(as well as other buffers)
+                inp = r_ten.to(self.model.device)
+                out_ = self.model(inp)
+                s_ten.copy_(out_.to(s_ten.device)) #this part should be moderated.(as well as other buffers)
 
             
             self.recv.release(r_ctl, r_ten)
@@ -212,26 +308,11 @@ class FullNode:
         self.recv.close()
 
 
-
-
-class PromptNode:
-    def __init__(
-            self,
-            model:nn.Module|None,
-            receiving_node:int,
-            receiving_dim:list|torch.Size
-
-        ):
-
-        pass
-
-
-
+############################################ main ###################################################
 
 class AddOne(nn.Module):
     def forward(self, x):
         return x + 1
-
         
 control_dim = [1]
 buffer_dim = [1,1]
@@ -240,24 +321,44 @@ dist.init_process_group('gloo')
 rank = dist.get_rank()
 
 
+if rank==1:
+    torch.cuda.set_device(0)
+elif rank==2:
+    torch.cuda.set_device(1)
+
+pg_nccl = dist.new_group(ranks=[1, 2], backend="nccl")
+
+
 if rank == 0:
+    
     send = PipeSender(
         destination=1,
         data_dim=buffer_dim,
         control_dim=control_dim,
         control_queue_size=4,
-        data_queue_size=4
+        data_queue_size=4,
+        control_group=None,
+        data_group=None,
+        control_device="cpu",
+        data_device="cpu",
+        control_dtype=torch.int32,
+        data_dtype=torch.float32,
     )
-    # send_control = Buffer_Send(control_dim, 1, 1)
-    # send_buf = Buffer_Send(buffer_dim, 1, 0)
 
     recv = PipeReceiver(
         source=2,
         data_dim=buffer_dim,
         control_dim=control_dim,
         control_queue_size=4,
-        data_queue_size=4
+        data_queue_size=4,
+        control_group=None,
+        data_group=None,
+        control_device="cpu",
+        data_device="cpu",
+        control_dtype=torch.int32,
+        data_dtype=torch.float32,
     )
+
     
     # recv_control = Buffer_Recv(control_dim, 2, 1)
     # recv_buf = Buffer_Recv(buffer_dim, 2, 0)
@@ -290,28 +391,44 @@ if rank == 0:
     recv.close()
 
 
+
 elif rank == 1:
+    # 0 -> 1 : Gloo CPU
+    # 1 -> 2 : NCCL CUDA cuda:0
     node = FullNode(
         model=AddOne(),
         receiving_node=0,
         receiving_dim=buffer_dim,
         sending_node=2,
         sending_dim=buffer_dim,
-        queue_size=4
+        queue_size=4,
+        recv_data_group=None,
+        send_data_group=pg_nccl,
+        recv_data_device="cpu",
+        send_data_device="cuda:0",
+        model_device="cuda:0",
+        data_dtype=torch.float32,
     )
     node.run()
-        
+
 
 elif rank == 2:
+    # 1 -> 2 : NCCL CUDA cuda:1
+    # 2 -> 0 : Gloo CPU
     node = FullNode(
         model=AddOne(),
         receiving_node=1,
         receiving_dim=buffer_dim,
         sending_node=0,
         sending_dim=buffer_dim,
-        queue_size=4
+        queue_size=4,
+        recv_data_group=pg_nccl,
+        send_data_group=None,
+        recv_data_device="cuda:1",
+        send_data_device="cpu",
+        model_device="cuda:1",
+        data_dtype=torch.float32,
     )
-
     node.run()
 
 

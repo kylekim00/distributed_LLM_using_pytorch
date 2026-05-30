@@ -71,8 +71,8 @@ class FullNode:
 
         
             with torch.no_grad():
-                out_ = self.model(r_ten)
-                s_ten.copy_(out_) #this part should be moderated.(as well as other buffers)
+                out_ = self.model(r_ten.to(self.model.device))
+                s_ten.copy_(out_.to(s_ten.device)) #this part should be moderated.(as well as other buffers)
 
             
             self.recv.release(r_ctl, r_ten)
@@ -81,6 +81,3 @@ class FullNode:
         
         self.send.close()
         self.recv.close()
-
-class PromptNode:
-    

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import (
@@ -7,14 +8,36 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
-#dsf
+
+
+def choose_attention_backend(device: str = "cpu") -> str:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        try:
+            import flash_attn  # noqa: F401
+            return "flash_attention_2"
+        except Exception:
+            pass
+
+    try:
+        test_device = torch.device(device)
+        q = torch.randn(1, 2, 4, 8, device=test_device)
+        k = torch.randn(1, 2, 4, 8, device=test_device)
+        v = torch.randn(1, 2, 4, 8, device=test_device)
+
+        _ = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+        return "sdpa"
+    except Exception:
+        pass
+    return "eager"
 
 class Model1(nn.Module):
-    def __init__(self, config, use_cache: bool = False):
+    def __init__(self, config, use_cache: bool = False, device:str="cpu"):
         super().__init__()
 
         self.use_cache = use_cache
-
+        self.config = config
+        # self.config._attn_implementation = choose_attention_backend(device)
         self.embed_tokens = nn.Embedding(
             config.vocab_size,
             config.hidden_size,
@@ -27,6 +50,8 @@ class Model1(nn.Module):
             LlamaDecoderLayer(config, layer_idx=i)
             for i in range(14)
         ])
+    def check_attn_backend(self):
+        self.config._attn_implementation = choose_attention_backend(self.device)
 
     def forward(
         self,
@@ -76,11 +101,12 @@ class Model1(nn.Module):
         }
 
 class Model2(nn.Module):
-    def __init__(self, config, use_cache: bool = False):
+    def __init__(self, config, use_cache: bool = False, device:str='cpu'):
         super().__init__()
 
         self.use_cache = use_cache
-
+        self.config = config
+        # self.config._attn_implementation = choose_attention_backend(device)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         self.layers = nn.ModuleList([
@@ -98,6 +124,8 @@ class Model2(nn.Module):
             config.vocab_size,
             bias=False,
         )
+    def check_attn_backend(self):
+        self.config._attn_implementation = choose_attention_backend(self.device)
 
     def forward(
         self,

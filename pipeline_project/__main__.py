@@ -53,7 +53,7 @@ def main():
             device='cpu'
         )
     else:
-        run_main()
+        run_main(SPLIT_DIR)
 
 
 
