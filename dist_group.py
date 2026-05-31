@@ -236,7 +236,7 @@ class FullNode:
         control_dim = [len(self.control_config)] 
 
 
-        #this nccl keeps getting problemssssssssss!!!!!!!!!
+        #keep the queue of NCCL to 1(this nccl keeps getting problemssssssssss!!!!!!!!!)
         recv_queue_size = queue_size
         send_queue_size = queue_size
 

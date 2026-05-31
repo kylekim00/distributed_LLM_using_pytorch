@@ -7,13 +7,18 @@ class Buffer_Send:
                  tensor_dim:list | torch.Size,
                  target:int, 
                  tag:int,
+                 group:dist.ProcessGroup|None=None,
+                 device:str='cpu',
+                 dtype:torch.dtype=torch.float32,
                  queue_size:int=4,
                 ):
         self.pending_queue = list()
         self.target = target
         self.tag = tag
-        self.free_tensor = [torch.empty(tensor_dim) for _ in range(queue_size)]
+        self.free_tensor = [torch.empty(size=tensor_dim, dtype=dtype, device=device) for _ in range(queue_size)]
+        self.group = group
         self.queue_size = queue_size
+
 
     def get_empty_tensor(self):
         if not self.free_tensor:
@@ -26,7 +31,7 @@ class Buffer_Send:
 
 
     def send_tensor(self, ten:torch.Tensor):
-        req = dist.isend(ten, self.target, tag=self.tag)
+        req = dist.isend(tensor=ten, dst=self.target, tag=self.tag, group=self.group)
         self.pending_queue.append((req, ten))
 
     #this is called when end signal is sent by send_tensor.
@@ -45,15 +50,19 @@ class Buffer_Recv:
                  tensor_dim:list | torch.Size, 
                  target:int,
                  tag:int, 
+                 group:dist.ProcessGroup|None=None,
+                 device:str='cpu',
+                 dtype:torch.dtype=torch.float32,
                  queue_size:int=4
                  ):
         self.pending_queue = list()
-        self.tag = tag
-        self.queue_size = queue_size
         self.target = target
+        self.tag = tag
+        self.group = group
+        self.queue_size = queue_size
         for _ in range(queue_size):#fill pending queue
-            ten = torch.empty(tensor_dim)
-            res = dist.irecv(ten, src=self.target, tag=self.tag)
+            ten = torch.empty(size=tensor_dim, dtype=dtype, device=device)
+            res = dist.irecv(ten, src=self.target, tag=self.tag, group=group)
             self.pending_queue.append((res, ten))
 
     #when starting computation, it gets the next tensor from pending queue to get data.
@@ -64,7 +73,7 @@ class Buffer_Recv:
 
     #when computation is done, it posts used tensor back to pending_queue
     def free_sent_tensor(self, ten:torch.Tensor)->None:
-        res = dist.irecv(ten,src=self.target, tag=self.tag)
+        res = dist.irecv(ten,src=self.target, tag=self.tag, group=self.group)
         self.pending_queue.append((res, ten))
 
     def close(self):
@@ -83,12 +92,38 @@ class PipeSender:
             control_dim:list | torch.Size, 
             control_queue_size:int, 
             data_queue_size:int,
-            pipe_tag=0
-            ):
-        self.control = Buffer_Send(control_dim, destination, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
-        self.data = Buffer_Send(data_dim, destination, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
+            pipe_tag:int=0,                 #if connecting same node, then it should have a different pipe.
 
-    def getBuffer(self)->tuple:
+            control_group:dist.ProcessGroup|None = None,
+            data_group:dist.ProcessGroup|None = None,
+            
+            control_device:str="cpu",
+            data_device:str="cpu",
+
+            control_dtype:torch.dtype = torch.int32,
+            data_dtype:torch.dtype = torch.float32
+
+            ):
+        self.control = Buffer_Send(
+            tensor_dim=control_dim, 
+            target=destination, 
+            tag=pipe_tag*2 + 1, 
+            group=control_group,
+            device=control_device,
+            dtype=control_dtype,
+            queue_size=control_queue_size
+            )
+        self.data = Buffer_Send(
+            tensor_dim=data_dim, 
+            target=destination, 
+            tag=pipe_tag*2 + 0, 
+            group=data_group,
+            device=data_device,
+            dtype=data_dtype,
+            queue_size=data_queue_size
+            )
+
+    def getBuffer(self)->tuple[torch.Tensor, torch.Tensor]:
         return self.control.get_empty_tensor(), self.data.get_empty_tensor()
 
     def send(self, ctl:torch.Tensor, data:torch.Tensor)->None:
@@ -108,12 +143,39 @@ class PipeReceiver:
             data_dim:list|torch.Size, 
             control_queue_size:int=4, 
             data_queue_size:int=4,
-            pipe_tag=0
+            pipe_tag=0,
+
+            control_group:dist.ProcessGroup | None=None,
+            data_group:dist.ProcessGroup | None = None,
+
+            control_device:str = 'cpu',
+            data_device:str = "cpu",
+
+            control_dtype:torch.dtype = torch.int32,
+            data_dtype:torch.dtype = torch.float32
             ):
-        self.control = Buffer_Recv(control_dim, source, tag=pipe_tag*2 + 1, queue_size=control_queue_size)
-        self.data = Buffer_Recv(data_dim, source, tag=pipe_tag*2 + 0, queue_size=data_queue_size)
+        
+        self.control = Buffer_Recv(
+            tensor_dim=control_dim,
+            target=source,
+            tag=pipe_tag * 2 + 1,
+            group=control_group,
+            device=control_device,
+            dtype=control_dtype,
+            queue_size=control_queue_size,
+        )
+
+        self.data = Buffer_Recv(
+            tensor_dim=data_dim,
+            target=source,
+            tag=pipe_tag * 2 + 0,
+            group=data_group,
+            device=data_device,
+            dtype=data_dtype,
+            queue_size=data_queue_size,
+        )
     
-    def recv(self)->list:
+    def recv(self)->tuple[torch.Tensor, torch.Tensor]:
         return self.control.get_next_tensor(), self.data.get_next_tensor()
 
     def release(self, ctl:torch.Tensor, data:torch.Tensor):
@@ -123,8 +185,5 @@ class PipeReceiver:
     def close(self):
         self.control.close()
         self.data.close()
-
-
-
 
 

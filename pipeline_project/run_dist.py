@@ -40,20 +40,13 @@ def load_model2(
 
 
 
-def run_dist(
+
+def run_main(
     input_dir:str
 ):
-    import subprocess
-    import sys
+    dist.init_process_group('gloo')
+    rank = dist.get_rank()
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node=3",
-        "-m",
-        "pipeline_project",
-    ]
-
-    subprocess.run(cmd, check=True)
-
+    if rank==1 or rank==2:
+        torch.cuda.set_device(0)
+    pg_nccl = dist.new_group(ranks=[1, 2], backend="nccl")
