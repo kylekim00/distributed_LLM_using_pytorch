@@ -197,26 +197,26 @@ class PipeReceiver:
 #.copy_() version 
 class FullNode:
     def __init__(self,
-        model: nn.Module,
-        
-        receiving_node: int,
-        receiving_dim: list | torch.Size,
+            model: nn.Module,
+            
+            receiving_node: int,
+            receiving_dim: list | torch.Size,
 
-        sending_node: int,
-        sending_dim: list | torch.Size,
-        
-        control_config: dict | None = None,
-        queue_size: int = 4,
-        
-        recv_data_group:dist.ProcessGroup | None = None,
-        send_data_group:dist.ProcessGroup | None = None,
-        
-        recv_data_device: str = "cpu",
-        send_data_device:str = "cpu",
-        model_device:str = "cpu",
-        
-        data_dtype: torch.dtype = torch.float32
-    ):
+            sending_node: int,
+            sending_dim: list | torch.Size,
+            
+            control_config: dict | None = None,
+            queue_size: int = 4,
+            
+            recv_data_group:dist.ProcessGroup | None = None,
+            send_data_group:dist.ProcessGroup | None = None,
+            
+            recv_data_device: str = "cpu",
+            send_data_device:str = "cpu",
+            model_device:str = "cpu",
+            
+            data_dtype: torch.dtype = torch.float32
+        ):
 
         self.model = model.to(model_device)
         self.model_device = model_device

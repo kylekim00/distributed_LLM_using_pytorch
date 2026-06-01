@@ -47,6 +47,12 @@ def run_main(
     dist.init_process_group('gloo')
     rank = dist.get_rank()
 
-    if rank==1 or rank==2:
-        torch.cuda.set_device(0)
+    # if rank==1 or rank==2:
+    #     torch.cuda.set_device(0)
     pg_nccl = dist.new_group(ranks=[1, 2], backend="nccl")
+
+    if rank==0:
+        pass
+    elif rank==1:
+        pass
+    
