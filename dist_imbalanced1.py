@@ -91,98 +91,6 @@ class Buffer_Recv:
             req.wait()
 
 
-
-
-class Control_Sender:
-    def __init__(
-            self,
-            dest:int,
-            control_config:dict|None = None,
-            queue_size:int=4,
-            tag:int = 0
-            ):
-        
-        self.dest = dest
-        self.control_config = control_config
-        self.queue_size = queue_size
-
-        self.control_config = {'end':False, 'append_state':True, 'data':1}
-        if control_config is not None:
-            for k, v in control_config.items():
-                if k in self.control_config.keys():
-                    continue
-                    # raise KeyError(f"{self.control_config.keys()} can not be in control_config. These are main keys")
-                self.control_config[k] = v
-        
-        self.control_len = len(self.control_config)
-        self.send_buffer = Buffer_Send(
-            tensor_dim=[self.control_len],
-            target=dest,
-            tag=tag,
-            dtype=torch.int32,
-            queue_size=queue_size
-        )
-    def send(
-            self,
-            control_config:dict
-        )->None:
-        keys = self.control_config.keys()
-        for key, value in control_config.items():
-            if key not in keys:
-                raise KeyError(f"control_config keys does not match: {key}")
-            self.control_config[key] = value
-        
-        ctl = self.send_buffer.get_empty_tensor()
-        for i, v in enumerate(self.control_config.values()):
-            ctl[i] = v
-        self.send_buffer.send_tensor(ctl)
-
-    def close(self):
-        self.send_buffer.close()
-            
-            
-class Control_Receiver:
-    def __init__(
-            self,
-            source:int,
-            control_config:dict|None = None,
-            queue_size:int=4,
-            tag:int=0
-        ):
-        self.source = source
-        self.control_config = control_config
-        self.queue_size = queue_size
-        self.tag = tag
-
-        self.control_config = {'end':False, 'append_state':True, "data":1}
-        if control_config is not None:
-            for k, v in control_config.items():
-                if k in self.control_config.keys():
-                    continue
-                    # raise KeyError(f"{self.control_config.keys()} can not be in control_config. These are main keys")
-                self.control_config[k] = v
-        
-        self.control_len = len(self.control_config)
-        self.recv_buffer = Buffer_Recv(
-            tensor_dim=[self.control_len],
-            target=source,
-            tag=tag,
-            dtype=torch.int32,
-            queue_size=queue_size
-        )
-    def recv(self)->dict:
-        ctl = self.recv_buffer.get_next_tensor()
-        for i, k in enumerate(self.control_config.keys()):
-            self.control_config[k] = int(ctl[i].item())
-        self.recv_buffer.free_sent_tensor(ctl)
-        return dict(self.control_config)
-    
-    def close(self)->None:
-        self.recv_buffer.close()
-    
-
-
-#this class is for control flags and data transmission in fixed size.
 class PipeSender:
     def __init__(
         self,
@@ -196,11 +104,6 @@ class PipeSender:
         data_device: str = "cpu",
         data_dtype: torch.dtype = torch.float32,
     ):
-        #NCCL can't receive data asynchronously using several isend.(as long as I know)
-        data_queue_size = queue_size
-        if data_group is not None:
-            data_queue_size = 1
-        
         self.control = Control_Sender(
             dest=destination,
             control_config=control_config,
@@ -215,7 +118,7 @@ class PipeSender:
             group=data_group,
             device=data_device,
             dtype=data_dtype,
-            queue_size=data_queue_size,
+            queue_size=queue_size,
         )
         
 
@@ -285,41 +188,99 @@ class PipeReceiver:
         self.data.close()
 
 
-#this class is for data transmission for data with dynamic sizes(dim_size=3).
-#need dim0, dim1, dim2 to send
-class PipeImbalancedSender:
-    def __init__(self):
-        pass
 
-
-class PipeImbalancedReceiver:
+class Control_Sender:
     def __init__(
-            self,
-            source:int,
-            control_config:dict|None=None,
-            queue_size:int = 1,
-            pipe_tag:int = 0,
+        self,
+        dest: int,
+        control_config: dict | None = None,
+        queue_size: int = 4,
+        tag: int = 0,
+    ):
+        self.dest = dest
+        self.queue_size = queue_size
 
-            data_group: dist.ProcessGroup | None = None,
-            data_device:str = "cpu",
-            data_dtype:torch.dtype = torch.float32
-            ):
-        
-        
-        self.control = Control_Receiver(
-            source=source,
-            control_config=control_config,
+        self.control_keys = ["end", "append_state", "data"]
+
+        if control_config is not None:
+            for k in control_config.keys():
+                if k not in self.control_keys:
+                    self.control_keys.append(k)
+
+        self.control_len = len(self.control_keys)
+
+        self.send_buffer = Buffer_Send(
+            tensor_dim=[self.control_len],
+            target=dest,
+            tag=tag,
+            dtype=torch.int32,
             queue_size=queue_size,
-            tag=pipe_tag * 2 + 1
         )
-    
-    def recv(self)->tuple[dict, torch.Tensor | None]:
-        control_config = self.control.recv()
-        if control_config['data']:
-            return
-    
-    
-    pass
+
+    def send(self, control_config: dict) -> None:
+        for key in control_config.keys():
+            if key not in self.control_keys:
+                raise KeyError(
+                    f"unknown control key: {key}, expected keys: {self.control_keys}"
+                )
+
+        ctl = self.send_buffer.get_empty_tensor()
+
+        for i, key in enumerate(self.control_keys):
+            if key not in control_config:
+                raise KeyError(
+                    f"missing control key: {key}, expected keys: {self.control_keys}"
+                )
+            ctl[i] = int(control_config[key])
+
+        self.send_buffer.send_tensor(ctl)
+
+    def close(self):
+        self.send_buffer.close()
+
+
+class Control_Receiver:
+    def __init__(
+        self,
+        source: int,
+        control_config: dict | None = None,
+        queue_size: int = 4,
+        tag: int = 0,
+    ):
+        self.source = source
+        self.queue_size = queue_size
+        self.tag = tag
+
+        self.control_keys = ["end", "append_state", "data"]
+
+        if control_config is not None:
+            for k in control_config.keys():
+                if k not in self.control_keys:
+                    self.control_keys.append(k)
+
+        self.control_len = len(self.control_keys)
+
+        self.recv_buffer = Buffer_Recv(
+            tensor_dim=[self.control_len],
+            target=source,
+            tag=tag,
+            dtype=torch.int32,
+            queue_size=queue_size,
+        )
+
+    def recv(self) -> dict:
+        ctl = self.recv_buffer.get_next_tensor()
+
+        result = {}
+        for i, key in enumerate(self.control_keys):
+            result[key] = int(ctl[i].item())
+
+        self.recv_buffer.free_sent_tensor(ctl)
+        return result
+
+    def close(self) -> None:
+        self.recv_buffer.close()
+
 
     
 
@@ -434,49 +395,55 @@ class FullNode:
 # Append : It synchronously receives first tensor of data which has big size to compute all the tokens that it received and store it in kv cache.
 # run : It generates a token and recursively computes each time. since this process has a fixed size of a tensor, it uses Pipe comm made above.
 
-
 class LLMNode1:
     def __init__(
-        self,
-        model: nn.Module,
+            self,
+            model: nn.Module,
+            
+            prompt_node: int,
 
-        receiving_node: int,
-        receiving_dim: list | torch.Size,
+            receiving_node: int,
+            receiving_dim: list | torch.Size,
 
-        prompt_node: int,
-        prompt_dim: list | torch.Size,
-
-        sending_node: int,
-        sending_dim: list | torch.Size,
-
-        control_config: dict | None = None,
-        queue_size: int = 4,
-
-        recv_data_group: dist.ProcessGroup | None = None,
-        send_data_group: dist.ProcessGroup | None = None,
-
-        recv_data_device: str = "cpu",
-        send_data_device: str = "cpu",
-        model_device: str = "cpu",
-
-        data_dtype: torch.dtype = torch.float32,
-    ):
+            sending_node: int,
+            sending_dim: list | torch.Size,
+            
+            # control_config: dict | None = None,
+            queue_size: int = 4,
+            
+            recv_data_group:dist.ProcessGroup | None = None,
+            send_data_group:dist.ProcessGroup | None = None,
+            
+            recv_data_device: str = "cpu",
+            send_data_device:str = "cpu",
+            model_device:str = "cpu",
+            
+            data_dtype: torch.dtype = torch.float32
+            ):
         self.model = model.to(model_device)
-        self.model.eval()
         self.model_device = model_device
+        self.prompt_node = prompt_node
+        self.sending_node = sending_node
+        self.data_dtype = data_dtype
 
-        if control_config is None:
-            control_config={'dim0':0, 'dim1':1, 'dim2':2},
+        self.recv_data_group = recv_data_group
+        self.send_data_group = send_data_group
 
-        # end / append_state / data DOES NOT GO IN SINCE IT IS ALREADY IN THE HEADER
-        self.control_config = dict(control_config)
+        self.recv_data_device = recv_data_device
+        self.send_data_device = send_data_device
 
+
+        self.control_config = {
+            'end':False,
+            'append':True
+        }
+        
         for key, value in self.control_config.items():
             if not isinstance(value, int):
-                raise ValueError(
-                    f"control_config[{key}] must be int, got {type(value)}"
-                )
+                raise ValueError(f"control_config{key} must be int, got {type(value)}")
+        control_dim = [len(self.control_config)]
 
+        #keep the queue of NCCL to 1(this nccl keeps getting problemssssssssss!!!!!!!!!)
         recv_queue_size = queue_size
         send_queue_size = queue_size
 
@@ -485,204 +452,75 @@ class LLMNode1:
         if send_data_group is not None:
             send_queue_size = 1
 
-        self.send2 = PipeSender(         #to node 2
+
+
+        #these are all for append=False.
+        self.send = PipeSender(
             destination=sending_node,
             data_dim=sending_dim,
-            control_config=self.control_config,
-            queue_size=send_queue_size,
+            control_dim=control_dim,
+            control_queue_size=queue_size,
+            data_queue_size=send_queue_size,
+            control_group=None,
             data_group=send_data_group,
+            control_device="cpu",
             data_device=send_data_device,
+            control_dtype=torch.int32,
             data_dtype=data_dtype,
         )
 
-        self.recv2 = PipeReceiver(       #from node 2
+        self.recv = PipeReceiver(
             source=receiving_node,
+            control_dim=control_dim,
             data_dim=receiving_dim,
-            control_config=self.control_config,
-            queue_size=recv_queue_size,
+            control_queue_size=queue_size,
+            data_queue_size=recv_queue_size,
+            control_group=None,
             data_group=recv_data_group,
+            control_device="cpu",
             data_device=recv_data_device,
+            control_dtype=torch.int32,
             data_dtype=data_dtype,
         )
 
-        self.ctl_recv0= Control_Receiver(
-            source=prompt_node,
-            control_config=self.control_config,
-            # tag=99
-             )
-        
-
-    def run(self) -> None:
-        running = True
+    def run(self)->None:
+        running=True
         append_state = True
-
         while running:
             if append_state:
-                self.control_config = self.ctl_recv0.recv()
 
-
-
-                
-
-
-
-
-            else:
-                r_ctl, r_ten = self.recv.recv()
-
-                if r_ctl["end"] == 1:
-                    # end control forwarding
-                    self.send.send(r_ctl, None)
+                size = torch.empty([3], dtype=torch.int32)
+                dist.recv(size, src=self.receiving_node, tag=99)
+                if size[0]==0:
+                    dist.send(size, dst=self.sending_node, tag=99)
+                    running=False
                     break
 
-                if r_ctl["data"] == 0:
-                    # data 없는 control만 forwarding
-                    self.send.send(r_ctl, None)
-                    continue
-
-                if r_ten is None:
-                    raise RuntimeError("control data flag is 1 but received tensor is None")
-
-                s_ten = self.send.getBuffer()
-
+                ten = torch.empty(size, dtype=self.data_dtype)
+                dist.recv(ten, src=self.receiving_node, group=self.recv_data_group, tag=99)
+                
                 with torch.no_grad():
-                    inp = r_ten.to(self.model_device)
-                    out = self.model(inp)
-                    s_ten.copy_(out.to(s_ten.device))
+                    inp = ten.to(self.model_device)
+                    out_= self.model(inp)
+                    ten = out_.to(self.send_data_device)
+                
+                size = torch.tensor(ten.shape, dtype=torch.int32)
+                dist.send(size, dst=self.sending_node)
+                dist.send(ten, dst=self.send_data_device, group=self.send_data_group)
+                append_state = False
+                
+            else:
+                r_ctl, r_ten = self.recv.recv()
+                s_ctl, s_ten = self.send.getBuffer()
 
-                self.recv.release(r_ten)
-                self.send.send(r_ctl, s_ten)
+                
+                pass
+
+
+
 
         self.send.close()
         self.recv.close()
-
-
-# class LLMNode1:
-#     def __init__(
-#             self,
-#             model: nn.Module,
-            
-#             prompt_node: int,
-
-#             receiving_node: int,
-#             receiving_dim: list | torch.Size,
-
-#             sending_node: int,
-#             sending_dim: list | torch.Size,
-            
-#             # control_config: dict | None = None,
-#             queue_size: int = 4,
-            
-#             recv_data_group:dist.ProcessGroup | None = None,
-#             send_data_group:dist.ProcessGroup | None = None,
-            
-#             recv_data_device: str = "cpu",
-#             send_data_device:str = "cpu",
-#             model_device:str = "cpu",
-            
-#             data_dtype: torch.dtype = torch.float32
-#             ):
-#         self.model = model.to(model_device)
-#         self.model_device = model_device
-#         self.prompt_node = prompt_node
-#         self.sending_node = sending_node
-#         self.data_dtype = data_dtype
-
-#         self.recv_data_group = recv_data_group
-#         self.send_data_group = send_data_group
-
-#         self.recv_data_device = recv_data_device
-#         self.send_data_device = send_data_device
-
-
-#         self.control_config = {
-#             'end':False,
-#             'append':True
-#         }
-        
-#         for key, value in self.control_config.items():
-#             if not isinstance(value, int):
-#                 raise ValueError(f"control_config{key} must be int, got {type(value)}")
-#         control_dim = [len(self.control_config)]
-
-#         #keep the queue of NCCL to 1(this nccl keeps getting problemssssssssss!!!!!!!!!)
-#         recv_queue_size = queue_size
-#         send_queue_size = queue_size
-
-#         if recv_data_group is not None:
-#             recv_queue_size = 1
-#         if send_data_group is not None:
-#             send_queue_size = 1
-
-
-
-#         #these are all for append=False.
-#         self.send = PipeSender(
-#             destination=sending_node,
-#             data_dim=sending_dim,
-#             control_dim=control_dim,
-#             control_queue_size=queue_size,
-#             data_queue_size=send_queue_size,
-#             control_group=None,
-#             data_group=send_data_group,
-#             control_device="cpu",
-#             data_device=send_data_device,
-#             control_dtype=torch.int32,
-#             data_dtype=data_dtype,
-#         )
-
-#         self.recv = PipeReceiver(
-#             source=receiving_node,
-#             control_dim=control_dim,
-#             data_dim=receiving_dim,
-#             control_queue_size=queue_size,
-#             data_queue_size=recv_queue_size,
-#             control_group=None,
-#             data_group=recv_data_group,
-#             control_device="cpu",
-#             data_device=recv_data_device,
-#             control_dtype=torch.int32,
-#             data_dtype=data_dtype,
-#         )
-
-#     def run(self)->None:
-#         running=True
-#         append_state = True
-#         while running:
-#             if append_state:
-
-#                 size = torch.empty([3], dtype=torch.int32)
-#                 dist.recv(size, src=self.receiving_node, tag=99)
-#                 if size[0]==0:
-#                     dist.send(size, dst=self.sending_node, tag=99)
-#                     running=False
-#                     break
-
-#                 ten = torch.empty(size, dtype=self.data_dtype)
-#                 dist.recv(ten, src=self.receiving_node, group=self.recv_data_group, tag=99)
-                
-#                 with torch.no_grad():
-#                     inp = ten.to(self.model_device)
-#                     out_= self.model(inp)
-#                     ten = out_.to(self.send_data_device)
-                
-#                 size = torch.tensor(ten.shape, dtype=torch.int32)
-#                 dist.send(size, dst=self.sending_node)
-#                 dist.send(ten, dst=self.send_data_device, group=self.send_data_group)
-#                 append_state = False
-                
-#             else:
-#                 r_ctl, r_ten = self.recv.recv()
-#                 s_ctl, s_ten = self.send.getBuffer()
-
-                
-#                 pass
-
-
-
-
-#         self.send.close()
-#         self.recv.close()
 
 
 ############################################
@@ -732,17 +570,17 @@ if rank == 0:
         print(f"Node 0 -{s_ten.item()}-> Node 1")
 
         send.send(
-            {"end": 0},
+            {"end": 0, "append_state": 0, "idx": i},
             s_ten,
         )
-#####################################################################
+
         r_ctl, r_ten = recv.recv()
 
         print(f"result: {r_ctl['idx']} -> {r_ten.item()}")
 
         recv.release(r_ten)
 
-    #end control
+    # end control만 보냄
     send.send(
         {"end": 1, "append_state": 0, "idx": 10},
         None,
