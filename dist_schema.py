@@ -3,7 +3,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 
-# Buffer  : 메모리 재사용
+# Buffer  : async buffer for socket transmission
 # Schema  : dict <-> tensor 변환
 # Channel : 한 종류의 통신 관리
 # Pipe    : control + data 묶기
@@ -664,8 +664,6 @@ class FullNode:
         self.send.close()
         self.recv.close()
 
-
-
 class LLMLayerNode1:
     def __init__(
         self,
@@ -673,14 +671,11 @@ class LLMLayerNode1:
 
         prompt_node: int,
 
-
-
         layer2_node: int,
         layer2_hidden_sending_dim,
         layer2_next_receiving_dim,
 
         extra_control_keys=None,
-
 
         prompt_recv_data_group: dist.ProcessGroup | None = None,
         prompt_recv_data_device: str = "cpu",
@@ -688,19 +683,13 @@ class LLMLayerNode1:
         layer2_send_data_group: dist.ProcessGroup | None = None,
         layer2_send_data_device: str = "cpu",
 
-
         layer2_recv_data_group: dist.ProcessGroup | None = None,
         layer2_recv_data_device: str = "cpu",
 
-        # prompt_send_data_group: dist.ProcessGroup | None = None,
-        # prompt_send_data_device: str = "cpu",
+        input_dtype: torch.dtype = torch.float32,
+        output_dtype: torch.dtype = torch.float32,
 
-
-        data_dtype: torch.dtype = torch.float32,
         model_device: str = "cpu",
-        
-        # send_data_group: dist.ProcessGroup | None = None,
-        # send_data_device: str = "cpu",
 
         queue_size: int = 4,
     ):
@@ -708,129 +697,153 @@ class LLMLayerNode1:
         self.model.eval()
         self.model_device = model_device
 
-        self.prompt_recv = PipeReceiver.dynamic( # 0 -> 1 dynamic
-            source=0,
-            data_dtype=data_dtype,
-            extra_control_keys=extra_control_keys,
-            pipe_tag=0,
-            )
+        self.input_dtype = input_dtype
+        self.output_dtype = output_dtype
 
-        self.layer2_dynamic_send = PipeSender.dynamic(# 1->2 dynamic
+        self.prompt_recv = PipeReceiver.dynamic(  # 0 -> 1 dynamic
+            source=prompt_node,
+            data_dtype=input_dtype,
+            extra_control_keys=extra_control_keys,
+            data_group=prompt_recv_data_group,
+            data_device=prompt_recv_data_device,
+            pipe_tag=0,
+        )
+
+        self.layer2_dynamic_send = PipeSender.dynamic(  # 1 -> 2 dynamic
             dest=layer2_node,
             extra_control_keys=extra_control_keys,
             data_group=layer2_send_data_group,
             data_device=layer2_send_data_device,
-            data_dtype=data_dtype,
-            pipe_tag=0
+            data_dtype=output_dtype,
+            pipe_tag=0,
         )
 
-
-        self.layer2_fixed_recv = PipeReceiver.fixed( # 2->1
+        self.layer2_fixed_recv = PipeReceiver.fixed(  # 2 -> 1
             source=layer2_node,
             data_dim=layer2_next_receiving_dim,
             extra_control_keys=extra_control_keys,
-            # queue_size=queue_size,
             data_group=layer2_recv_data_group,
             data_device=layer2_recv_data_device,
-            data_dtype=data_dtype,
+            data_dtype=input_dtype,
         )
 
-        self.layer2_fixed_send = PipeSender.fixed( # 1->2
+        self.layer2_fixed_send = PipeSender.fixed(  # 1 -> 2
             dest=layer2_node,
             data_dim=layer2_hidden_sending_dim,
             extra_control_keys=extra_control_keys,
             queue_size=queue_size,
             data_group=layer2_send_data_group,
             data_device=layer2_send_data_device,
-            data_dtype=data_dtype,
-            pipe_tag=1
+            data_dtype=output_dtype,
+            pipe_tag=1,
         )
+
         self.layer2_send_data_device_is_cpu = layer2_send_data_device == "cpu"
         self.layer2_recv_data_device_is_cpu = layer2_recv_data_device == "cpu"
-        # self.prompt_send_data_device_is_cpu = prompt_send_data_device == "cpu"
         self.prompt_recv_data_device_is_cpu = prompt_recv_data_device == "cpu"
-        
+
         self.state = True
 
     def run(self) -> None:
         self.model.eval()
         past_key_values = None
         cache_len = 0
+
         while True:
             if self.state:
                 ctl, X = self.prompt_recv.recv()
-                if ctl['end']:
+
+                if ctl["end"]:
                     self.prompt_recv.release(X)
                     break
-                if ctl['data'] == 0:
+
+                if ctl["data"] == 0:
                     continue
-                input1 = X.to(self.model_device)
-                
-                cache_position = torch.arange(cache_len, X.shape[1] + cache_len, device=input1.device)
+
+                input1 = X.to(
+                    device=self.model_device,
+                    dtype=self.input_dtype,
+                )
+
+                cache_position = torch.arange(
+                    cache_len,
+                    X.shape[1] + cache_len,
+                    device=input1.device,
+                )
                 cache_len = cache_len + X.shape[1]
-                
-                _res = self.layer1(
-                    input_ids = input1,
-                    past_key_values = past_key_values,
+
+                _res = self.model(
+                    input_ids=input1,
+                    past_key_values=past_key_values,
                     cache_position=cache_position,
-                    use_cache = True
-                    )
-                
+                    use_cache=True,
+                )
+
                 past_key_values = _res["past_key_values"]
 
-                _out = _res["logits"][:, -1].argmax(dim=-1, keepdim=True)
                 if self.layer2_send_data_device_is_cpu:
-                    out = _out["hidden_states"].to("cpu")
+                    out = _res["hidden_states"][:, -1].to(
+                        device="cpu",
+                        dtype=self.output_dtype,
+                    )
                 else:
-                    #if model and layer2_send node exists in a different GPU device, then this might get an error.
-                    out = _out["hidden_states"]
+                    out = _res["hidden_states"].to(
+                        dtype=self.output_dtype,
+                    )
 
-
-                self.layer2_dynamic_send.send(ctl,out) #doesn't need get_buffer()
+                self.layer2_dynamic_send.send(ctl, out)
                 self.state = False
+
             else:
-                #prompt recv
-                # ctl_prompt, _ = self.prompt_recv.recv()
-                # if ctl_prompt['end']:
-                #     break
-                
-                #next_token recv
                 ctl, next_token = self.layer2_fixed_recv.recv()
-                if ctl['end']:
+
+                if ctl["end"]:
                     self.layer2_fixed_recv.release(next_token)
                     self.layer2_fixed_send.send(ctl)
                     break
-                if ctl['eop']:
+
+                if ctl["eop"]:
                     self.state = True
                     self.layer2_fixed_recv.release(next_token)
                     continue
 
+                input1 = next_token.to(
+                    device=self.model_device,
+                    dtype=self.input_dtype,
+                )
 
-                input1 = next_token.to(self.model_device)
-                cache_position = torch.tensor([cache_len], device=input1.device)
+                cache_position = torch.tensor(
+                    [cache_len],
+                    device=input1.device,
+                )
                 cache_len = cache_len + 1
 
                 _res = self.model(
-                    input_ids = input1,
-                    past_key_values = past_key_values,
-                    cache_position = cache_position,
-                    use_cache = True
+                    input_ids=input1,
+                    past_key_values=past_key_values,
+                    cache_position=cache_position,
+                    use_cache=True,
                 )
-                
+
                 past_key_values = _res["past_key_values"]
                 _out = _res["hidden_states"]
 
                 if self.layer2_send_data_device_is_cpu:
-                    _out = _out.to("cpu")
+                    _out = _out.to(
+                        device="cpu",
+                        dtype=self.output_dtype,
+                    )
                 else:
-                    #if model and layer2_send node exists in a different GPU device, then this might get an error... But who would do that?
-                    _out = _out
-                    
-                out = self.layer2_fixed_send.get_buffer()
+                    _out = _out.to(
+                        dtype=self.output_dtype,
+                    )
 
+                out = self.layer2_fixed_send.get_buffer()
                 out.copy_(_out)
+
                 self.layer2_fixed_send.send(ctl, out)
                 self.layer2_fixed_recv.release(next_token)
+
     def close(self):
         self.layer2_dynamic_send.close()
         self.layer2_fixed_send.close()

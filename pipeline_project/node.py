@@ -2,83 +2,10 @@ import torch
 import torch.distributed as dist
 from .pipe import *
 import torch.nn as nn
-
-class FullNode:
-    def __init__(
-        self,
-        model: nn.Module,
-
-        receiving_node: int,
-        receiving_dim,
-
-        sending_node: int,
-        sending_dim,
-
-        extra_control_keys=None,
-
-        recv_data_group: dist.ProcessGroup | None = None,
-        recv_data_device: str = "cpu",
-
-        data_dtype: torch.dtype = torch.float32,
-        model_device: str = "cpu",
-        
-        send_data_group: dist.ProcessGroup | None = None,
-        send_data_device: str = "cpu",
-
-        queue_size: int = 4,
-    ):
-        self.model = model.to(model_device)
-        self.model.eval()
-        self.model_device = model_device
-
-        self.recv = PipeReceiver.fixed(
-            source=receiving_node,
-            data_dim=receiving_dim,
-            extra_control_keys=extra_control_keys,
-            queue_size=queue_size,
-            data_group=recv_data_group,
-            data_device=recv_data_device,
-            data_dtype=data_dtype,
-        )
-
-        self.send = PipeSender.fixed(
-            dest=sending_node,
-            data_dim=sending_dim,
-            extra_control_keys=extra_control_keys,
-            queue_size=queue_size,
-            data_group=send_data_group,
-            data_device=send_data_device,
-            data_dtype=data_dtype,
-        )
-
-    def run(self) -> None:
-        while True:
-            ctl, x = self.recv.recv()
-
-            if ctl["end"] == 1:
-                self.send.send(ctl, None)
-                break
-
-            if ctl["data"] == 0:
-                self.send.send(ctl, None)
-                continue
-
-            if x is None:
-                raise RuntimeError("control says data=1 but tensor is None")
-
-            y_buf = self.send.get_buffer()
-
-            with torch.no_grad():
-                x_model = x.to(self.model_device)
-                y = self.model(x_model)
-                y_buf.copy_(y.to(y_buf.device))
-
-            self.recv.release(x)
-            self.send.send(ctl, y_buf)
-
-        self.send.close()
-        self.recv.close()
-
+import torch
+import torch.distributed as dist
+from .pipe import *
+import torch.nn as nn
 
 
 class LLMLayerNode1:
@@ -111,9 +38,10 @@ class LLMLayerNode1:
         # prompt_send_data_device: str = "cpu",
 
 
-        data_dtype: torch.dtype = torch.float32,
+        input_dtype: torch.dtype = torch.float32, 
+        output_dtype: torch.dtype = torch.float32,
         model_device: str = "cpu",
-        
+
         # send_data_group: dist.ProcessGroup | None = None,
         # send_data_device: str = "cpu",
 
@@ -123,10 +51,15 @@ class LLMLayerNode1:
         self.model.eval()
         self.model_device = model_device
 
+        self.input_dtype = input_dtype 
+        self.output_dtype = output_dtype 
+
         self.prompt_recv = PipeReceiver.dynamic( # 0 -> 1 dynamic
-            source=0,
-            data_dtype=data_dtype,
+            source=prompt_node, 
+            data_dtype=input_dtype, 
             extra_control_keys=extra_control_keys,
+            data_group=prompt_recv_data_group, 
+            data_device=prompt_recv_data_device, 
             pipe_tag=0,
             )
 
@@ -135,7 +68,7 @@ class LLMLayerNode1:
             extra_control_keys=extra_control_keys,
             data_group=layer2_send_data_group,
             data_device=layer2_send_data_device,
-            data_dtype=data_dtype,
+            data_dtype=output_dtype, 
             pipe_tag=0
         )
 
@@ -147,7 +80,7 @@ class LLMLayerNode1:
             # queue_size=queue_size,
             data_group=layer2_recv_data_group,
             data_device=layer2_recv_data_device,
-            data_dtype=data_dtype,
+            data_dtype=input_dtype, 
         )
 
         self.layer2_fixed_send = PipeSender.fixed( # 1->2
@@ -157,14 +90,14 @@ class LLMLayerNode1:
             queue_size=queue_size,
             data_group=layer2_send_data_group,
             data_device=layer2_send_data_device,
-            data_dtype=data_dtype,
+            data_dtype=output_dtype, 
             pipe_tag=1
         )
         self.layer2_send_data_device_is_cpu = layer2_send_data_device == "cpu"
         self.layer2_recv_data_device_is_cpu = layer2_recv_data_device == "cpu"
         # self.prompt_send_data_device_is_cpu = prompt_send_data_device == "cpu"
         self.prompt_recv_data_device_is_cpu = prompt_recv_data_device == "cpu"
-        
+
         self.state = True
 
     def run(self) -> None:
@@ -175,40 +108,43 @@ class LLMLayerNode1:
             if self.state:
                 ctl, X = self.prompt_recv.recv()
                 if ctl['end']:
+                    self.layer2_dynamic_send.send(ctl, None) 
                     self.prompt_recv.release(X)
                     break
                 if ctl['data'] == 0:
+                    self.prompt_recv.release(X) 
                     continue
-                input1 = X.to(self.model_device)
-                
-                cache_position = torch.arange(cache_len, X.shape[1] + cache_len, device=input1.device)
-                cache_len = cache_len + X.shape[1]
-                
-                _res = self.layer1(
+                input1 = X.squeeze(-1).long().to(self.model_device) 
+
+                cache_position = torch.arange(cache_len, input1.shape[1] + cache_len, device=input1.device) 
+                cache_len = cache_len + input1.shape[1] 
+
+                _res = self.model(
                     input_ids = input1,
                     past_key_values = past_key_values,
                     cache_position=cache_position,
                     use_cache = True
                     )
-                
+
                 past_key_values = _res["past_key_values"]
 
-                _out = _res["logits"][:, -1].argmax(dim=-1, keepdim=True)
+                # _out = _res["logits"][:, -1].argmax(dim=-1, keepdim=True) #why the fxxk did you do this???
                 if self.layer2_send_data_device_is_cpu:
-                    out = _out["hidden_states"].to("cpu")
+                    out = _res["hidden_states"].to(device="cpu", dtype=self.output_dtype) 
                 else:
                     #if model and layer2_send node exists in a different GPU device, then this might get an error.
-                    out = _out["hidden_states"]
+                    out = _res["hidden_states"].to(dtype=self.output_dtype) 
 
 
                 self.layer2_dynamic_send.send(ctl,out) #doesn't need get_buffer()
+                self.prompt_recv.release(X) 
                 self.state = False
             else:
                 #prompt recv
                 # ctl_prompt, _ = self.prompt_recv.recv()
                 # if ctl_prompt['end']:
                 #     break
-                
+
                 #next_token recv
                 ctl, next_token = self.layer2_fixed_recv.recv()
                 if ctl['end']:
@@ -221,7 +157,7 @@ class LLMLayerNode1:
                     continue
 
 
-                input1 = next_token.to(self.model_device)
+                input1 = next_token.long().to(self.model_device)
                 cache_position = torch.tensor([cache_len], device=input1.device)
                 cache_len = cache_len + 1
 
@@ -231,16 +167,16 @@ class LLMLayerNode1:
                     cache_position = cache_position,
                     use_cache = True
                 )
-                
+
                 past_key_values = _res["past_key_values"]
                 _out = _res["hidden_states"]
 
                 if self.layer2_send_data_device_is_cpu:
-                    _out = _out.to("cpu")
+                    _out = _out.to(device="cpu", dtype=self.output_dtype) 
                 else:
-                    #if model and layer2_send node exists in a different GPU device, then this might get an error... But who would do that?
-                    _out = _out
-                    
+                    #if model and layer2_send node exists in a different GPU device, then this might get an error... But who the hell would do that?
+                    _out = _out.to(dtype=self.output_dtype) 
+
                 out = self.layer2_fixed_send.get_buffer()
 
                 out.copy_(_out)
@@ -251,7 +187,7 @@ class LLMLayerNode1:
         self.layer2_fixed_send.close()
         self.layer2_fixed_recv.close()
         self.prompt_recv.close()
-            
+
 class LLMLayerNode2:
         def __init__(
                 self,
@@ -263,7 +199,7 @@ class LLMLayerNode2:
                 layer1_hidden_receiving_dim,
 
                 next_token_sending_dim,
-                
+
                 eos_token_id,
                 extra_control_keys = None,
 
@@ -276,7 +212,8 @@ class LLMLayerNode2:
                 layer1_send_data_group: dist.ProcessGroup | None = None,
                 layer1_send_data_device: str = "cpu",
 
-                data_dtype: torch.dtype = torch.float32,
+                input_dtype: torch.dtype = torch.float32, 
+                output_dtype: torch.dtype = torch.float32,
                 model_device: str = "cpu",
 
                 queue_size:int = 4,
@@ -285,12 +222,16 @@ class LLMLayerNode2:
             self.model.eval()
             self.model_device = model_device
             self.eos_token_id = eos_token_id
+
+            self.input_dtype = input_dtype 
+            self.output_dtype = output_dtype 
+
             self.layer1_dynamic_recv = PipeReceiver.dynamic( # 1 -> 2 dynamic
                 source=layer1_node,
                 extra_control_keys=extra_control_keys,
                 data_group=layer1_recv_data_group,
                 data_device=layer1_recv_data_device,
-                data_dtype=data_dtype,
+                data_dtype=input_dtype,
                 pipe_tag=0,
             )
             self.layer1_fixed_recv = PipeReceiver.fixed( # 1 -> 2
@@ -299,7 +240,7 @@ class LLMLayerNode2:
                 extra_control_keys=extra_control_keys,
                 data_group=layer1_recv_data_group,
                 data_device=layer1_recv_data_device,
-                data_dtype=data_dtype,
+                data_dtype=input_dtype,
                 pipe_tag=1
             )
             self.prompt_send= PipeSender.fixed( # 2 -> 0
@@ -309,9 +250,9 @@ class LLMLayerNode2:
                 queue_size=queue_size,
                 data_group=prompt_send_data_group,
                 data_device=prompt_send_data_device,
-                data_dtype=data_dtype
+                data_dtype=output_dtype 
             )
-            
+
 
             self.layer1_send = PipeSender.fixed( # 2 -> 1
                 dest= layer1_node,
@@ -320,7 +261,7 @@ class LLMLayerNode2:
                 queue_size=queue_size,
                 data_group= layer1_send_data_group,
                 data_device= layer1_send_data_device,
-                data_dtype=data_dtype,
+                data_dtype=output_dtype, 
             )
 
             self.layer1_send_data_device_is_cpu = layer1_send_data_device == "cpu"
@@ -344,13 +285,13 @@ class LLMLayerNode2:
                         continue
 
 
-                    input2 = X.to(self.model_device)
+                    input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
 
-                    cache_position = torch.arange(cache_len, X.shape[1] + cache_len, device=input2.device)
-                    cache_len = cache_len + X.shape[1]
+                    cache_position = torch.arange(cache_len, input2.shape[1] + cache_len, device=input2.device) # 이거 추가했어요!!!!
+                    cache_len = cache_len + input2.shape[1] 
 
                     _res = self.model(
-                        input_ids = input2,
+                        hidden_states = input2, 
                         past_key_values = past_key_values,
                         cache_position = cache_position,
                         use_cache = True
@@ -360,34 +301,36 @@ class LLMLayerNode2:
 
                     if _out.item() == self.eos_token_id:
                         ctl['eop'] = True
+                        
                         self.layer1_send.send(ctl)
                         self.prompt_send.send(ctl)
+                        self.layer1_dynamic_recv.release(X) 
                         continue
 
                     out1 = self.layer1_send.get_buffer()
                     out2 = self.prompt_send.get_buffer()
 
                     if self.layer1_send_data_device_is_cpu:
-                        _out1 = _out.to("cpu")
+                        _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
                     else:
-                        _out1 = _out
+                        _out1 = _out.to(dtype=self.output_dtype) 
 
                     out1.copy_(_out1)
 
                     if self.prompt_send_data_device_is_cpu:
-                        _out2 = _out.to("cpu")
+                        _out2 = _out.to(device="cpu", dtype=self.output_dtype)
                     else:
-                        _out2= _out
-                    
+                        _out2= _out.to(dtype=self.output_dtype) 
+
                     out2.copy_(_out2)
 
                     self.layer1_send.send(ctl, out1)
                     self.prompt_send.send(ctl, out2)
-                    
+
                     self.layer1_dynamic_recv.release(X)
                     self.state = False
                 else:
-                    #TODO get hidden next_token state compute layer2, if eos, turn on eos, if not send next_token to prompt and layer1
+                    
                     ctl, X = self.layer1_fixed_recv.recv() # get next state token
 
                     if ctl['end']:
@@ -397,13 +340,13 @@ class LLMLayerNode2:
                         self.state = True
                         self.layer1_fixed_recv.release(X)
                         continue
-                    
-                    input2 = X.to(self.model_device)
+
+                    input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
                     cache_position = torch.tensor([cache_len], device=input2.device)
                     cache_len = cache_len + 1
-                    
-                    _res = self.layer2(
-                        input_ids = input2,
+
+                    _res = self.model( 
+                        hidden_states = input2, 
                         past_key_values = past_key_values,
                         cache_position = cache_position,
                         use_cache = True
@@ -417,17 +360,17 @@ class LLMLayerNode2:
                     out2 = self.prompt_send.get_buffer()
 
                     if self.layer1_send_data_device_is_cpu:
-                        _out1 = _out.to("cpu")
+                        _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
                     else:
-                        _out1 = _out
-                    
+                        _out1 = _out.to(dtype=self.output_dtype)
+
                     out1.copy_(_out1)
 
                     if self.prompt_send_data_device_is_cpu:
-                        _out2 = _out.to("cpu")
+                        _out2 = _out.to(device="cpu", dtype=self.output_dtype) 
                     else:
-                        _out2 = _out
-                    
+                        _out2 = _out.to(dtype=self.output_dtype)
+
                     out2.copy_(_out2)
 
                     if _out.item() == self.eos_token_id:
@@ -454,7 +397,7 @@ class LLMPromptNode:
                 self,
                 tokenizer_path:Path,
                 layer1_node:int,
-                
+
                 layer2_node:int,
                 layer2_next_receiving_dim,
 
@@ -466,18 +409,22 @@ class LLMPromptNode:
                 layer2_recv_data_group:dist.ProcessGroup | None = None,
                 layer2_recv_data_device:str = "cpu",
 
-                data_dtype : torch.dtype = torch.float32,
+                input_dtype : torch.dtype = torch.float32, 
+                output_dtype : torch.dtype = torch.float32,
 
                 queue_size: int = 4
                 ):
-            
+
+            self.input_dtype = input_dtype 
+            self.output_dtype = output_dtype 
+
             self.layer1_send = PipeSender.dynamic(
                 dest=layer1_node,
                 extra_control_keys=extra_control_keys,
                 queue_size=queue_size,
                 data_group=layer1_send_data_group,
                 data_device=layer1_send_data_device,
-                data_dtype=data_dtype
+                data_dtype=output_dtype
             )
 
             self.layer2_recv = PipeReceiver.fixed(
@@ -486,12 +433,13 @@ class LLMPromptNode:
                 queue_size=queue_size,
                 data_group=layer2_recv_data_group,
                 data_device=layer2_recv_data_device,
-                data_dtype=data_dtype,
+                data_dtype=input_dtype, 
             )
 
-            
+
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
             self.layer_data_is_cpu = layer1_send_data_device == "cpu"
+            self.layer1_send_data_device = layer1_send_data_device
             self.state = True
 
 
@@ -499,39 +447,51 @@ class LLMPromptNode:
             prompt = ""
             while True:
                 if self.state:
-                    p = input("prompt: ")
-                    if p.lower() in ("q","quit"):
+                    print("user: ", end="")
+                    p = input()
+                    if p.lower() in ("q","quit", "exit"):
                         break
-                    prompt += "\nuser : "+ p + "\nprompt: "
+                    new_text = (
+                        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+                        + p
+                        + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+                    )   
+                    prompt += new_text
+                    inputs = self.tokenizer(new_text, return_tensors="pt")
 
-                    inputs = self.tokenizer(prompt, return_tensors="pt")
-
-                    # attention_mask = inputs.get("attention_mask", None) 
-                    # ##sxxt...... I didn't thought about sending.. this.... 
-                    # ##but since my implementation receive only one prompt, it's okay for now.
+                    # attention_mask = inputs.get("attention_mask", None)
+                    # ##sxxt...... I didn't thought about sending.. this....
+                    # Well.... sdpa seems to apply causal mask automatically.
+                    # and since my implementation receive only one prompt, it's okay for now.
 
                     # if attention_mask is not None:
                     #     attention_mask = attention_mask.to(device)
+                    input_ids = inputs['input_ids'].to(dtype=self.output_dtype).unsqueeze(-1)
                     if not self.layer_data_is_cpu:
-                        input_ids = inputs['input_ids'].to("cuda")
-                    else:
-                        input_ids = inputs['input_ids']
-                    
+                        input_ids = input_ids.to(device=self.layer1_send_data_device, dtype=self.output_dtype)
+
                     self.layer1_send.send({'end':False,'eop':False}, input_ids)
 
                     self.state = False
-                    print("prompt: ", end="")
+                    print("llama: ", end="")
                 else:
                     ctl, next_token = self.layer2_recv.recv()
 
                     if ctl['eop']:
+                        self.layer2_recv.release(next_token) 
                         self.state = True
+                        print() 
                         continue
-                    
-                    token_text = self.tokenizer.decode(next_token[0])
+
+                    next_token = next_token.long() 
+                    token_text = self.tokenizer.decode(next_token[0].tolist()) 
                     print(token_text, end="")
                     prompt += token_text
                     self.layer2_recv.release(next_token)
 
 
             self.layer1_send.send({'end':True})
+
+        def close(self):
+            self.layer1_send.close()
+            self.layer2_recv.close()

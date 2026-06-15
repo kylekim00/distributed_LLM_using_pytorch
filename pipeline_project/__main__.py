@@ -9,7 +9,7 @@ from .parser import MyParser
 from .download import download_model
 from .run_dist import *
 from pathlib import Path
-
+from .run_dist import run_main
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -21,14 +21,14 @@ SPLIT_DIR = MODEL_ROOT / "Llama-3.2-3B-Instruct-split"
 SPLIT_IDX = 14
 
 
-def run_main():
-    print("main")
-    print(PROJECT_ROOT)
-    print(REPO_ID)
-    print(LOCAL_DIR)
-    print(SPLIT_DIR)
+# def run_main():
+#     print("main")
+#     print(PROJECT_ROOT)
+#     print(REPO_ID)
+#     print(LOCAL_DIR)
+#     print(SPLIT_DIR)
 
-    pass
+#     pass
 
 def main():
     parser = MyParser()

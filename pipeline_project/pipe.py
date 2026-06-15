@@ -25,9 +25,9 @@ class ControlSchema:
         return len(self.keys)
 
     def encode(self, msg: dict, out: torch.Tensor):
-        for key in msg.keys():
-            if key not in self.keys:
-                raise KeyError(f"unknown control key: {key}, expected={self.keys}")
+        # for key in msg.keys():
+        #     if key not in self.keys:
+        #         raise KeyError(f"unknown control key: {key}, expected={self.keys}")
 
         for i, key in enumerate(self.keys):
             if key not in msg:

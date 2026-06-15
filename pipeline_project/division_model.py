@@ -37,13 +37,13 @@ class Model1(nn.Module):
 
         self.use_cache = use_cache
         self.config = config
-        # self.config._attn_implementation = choose_attention_backend(device)
+        self.config._attn_implementation = choose_attention_backend(device)
         self.embed_tokens = nn.Embedding(
             config.vocab_size,
             config.hidden_size,
             padding_idx=config.pad_token_id,
         )
-
+        self.device = device
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         self.layers = nn.ModuleList([
@@ -106,9 +106,9 @@ class Model2(nn.Module):
 
         self.use_cache = use_cache
         self.config = config
-        # self.config._attn_implementation = choose_attention_backend(device)
+        self.config._attn_implementation = choose_attention_backend(device)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
-
+        self.device = device
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, layer_idx=i)
             for i in range(14, config.num_hidden_layers)
