@@ -7,8 +7,7 @@ from .parser import MyParser
 from .download import download_model
 from .division_model import Model1, Model2
 from .pipe import PipeReceiver, PipeSender
-from .node import FullNode
-
+from .node import *
 
 def load_model1(
         input_dir:str,

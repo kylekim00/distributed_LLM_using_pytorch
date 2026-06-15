@@ -106,7 +106,11 @@ class Control_Sender:
         self.control_config = control_config
         self.queue_size = queue_size
 
-        self.control_config = {'end':False, 'append_state':True, 'data':1}
+        self.control_config = {
+                                'end':False, 
+                                'append_state':True, 
+                                'data':1
+                                }
         if control_config is not None:
             for k, v in control_config.items():
                 if k in self.control_config.keys():
@@ -154,7 +158,11 @@ class Control_Receiver:
         self.queue_size = queue_size
         self.tag = tag
 
-        self.control_config = {'end':False, 'append_state':True, "data":1}
+        self.control_config = {
+                                'end':False, 
+                                'append_state':True, 
+                                "data":1
+                                }
         if control_config is not None:
             for k, v in control_config.items():
                 if k in self.control_config.keys():
@@ -217,7 +225,9 @@ class PipeSender:
             dtype=data_dtype,
             queue_size=data_queue_size,
         )
-        
+
+        pass
+
 
     def getBuffer(self) -> torch.Tensor:
         return self.data.get_empty_tensor()
@@ -283,13 +293,70 @@ class PipeReceiver:
     def close(self):
         # self.control.close()
         self.data.close()
+    
+
 
 
 #this class is for data transmission for data with dynamic sizes(dim_size=3).
 #need dim0, dim1, dim2 to send
 class PipeImbalancedSender:
-    def __init__(self):
-        pass
+    def __init__(
+            self,
+            destination:int,
+            control_config:dict|None=None,
+            queue_size:int = 1,
+            pipe_tag:int=0,
+
+            data_group:dist.ProcessGroup | None = None,
+            data_device:str = "cpu",
+            data_dtype:torch.dtype = torch.float32
+            ):
+        self.data_dtype = data_dtype
+        self.data_device = data_device
+        self.data_group = data_group
+        self.destination = destination
+        self.pipe_tag = pipe_tag
+        self.control_config = {
+                                'end':False, 
+                                'append_state':True, 
+                                'data':1, 
+                                'dim0':0, 
+                                'dim1':0, 
+                                'dim2':0
+                                }
+        if control_config is not None:
+            for k, v in control_config.items():
+                if k in self.control_config.keys():
+                    continue
+                self.control_config[k] = v
+            
+        self.control = Control_Sender(
+            dest=destination,
+            control_config=self.control_config,
+            queue_size=queue_size,
+            tag=pipe_tag * 2 + 1,
+        )
+
+    def imb_send(self, ten:torch.Tensor):
+        if len(ten.shape)!=3:
+            raise ValueError(f"tensor should have a dim rank of 3")
+        self.control_config['dim0'] = ten.shape[0]
+        self.control_config['dim1'] = ten.shape[1]
+        self.control_config['dim2'] = ten.shape[2]
+
+        self.control.send(self.control_config)
+
+        dist.send(ten, dst=self.destination, group=self.data_group, tag=self.pipe_tag * 2)
+
+    def close(self):
+        self.control.send({'end':1})
+        self.control.close()
+    
+        
+
+        
+
+
 
 
 class PipeImbalancedReceiver:
@@ -305,21 +372,52 @@ class PipeImbalancedReceiver:
             data_dtype:torch.dtype = torch.float32
             ):
         
+        self.data_dtype = data_dtype
+        self.data_device = data_device
+        self.data_group = data_group
+        self.source = source
+        self.pipe_tag = pipe_tag
+
+        self.control_config = {
+                                'end':False, 
+                                'append_state':True, 
+                                'data':1, 
+                                'dim0':0, 
+                                'dim1':0, 
+                                'dim2':0
+                                }
+        if control_config is not None:
+            for k, v in control_config.items():
+                if k in self.control_config.keys():
+                    continue
+                self.control_config[k] = v
         
         self.control = Control_Receiver(
             source=source,
-            control_config=control_config,
+            control_config=self.control_config,
             queue_size=queue_size,
             tag=pipe_tag * 2 + 1
         )
     
-    def recv(self)->tuple[dict, torch.Tensor | None]:
+    def imb_recv(self)->tuple[dict, torch.Tensor | None]:
         control_config = self.control.recv()
-        if control_config['data']:
-            return
+        if control_config['end'] == 1:
+            return control_config, None
+        if control_config['data'] == 0:
+            return control_config, None
+        dim = [
+            control_config['dim0'], 
+            control_config['dim1'], 
+            control_config['dim2']
+        ]
+        ten = torch.empty(dim, dtype=self.data_dtype, device=self.data_device)
+        dist.recv(ten, self.source, group=self.data_group, tag=self.pipe_tag * 2)
+        return dict(control_config), ten
+
+    def close(self):
+        self.control.close()
     
     
-    pass
 
     
 
@@ -434,7 +532,6 @@ class FullNode:
 # Append : It synchronously receives first tensor of data which has big size to compute all the tokens that it received and store it in kv cache.
 # run : It generates a token and recursively computes each time. since this process has a fixed size of a tensor, it uses Pipe comm made above.
 
-
 class LLMNode1:
     def __init__(
         self,
@@ -522,9 +619,7 @@ class LLMNode1:
 
 
 
-                
-
-
+        
 
 
             else:
@@ -556,136 +651,7 @@ class LLMNode1:
         self.send.close()
         self.recv.close()
 
-
-# class LLMNode1:
-#     def __init__(
-#             self,
-#             model: nn.Module,
-            
-#             prompt_node: int,
-
-#             receiving_node: int,
-#             receiving_dim: list | torch.Size,
-
-#             sending_node: int,
-#             sending_dim: list | torch.Size,
-            
-#             # control_config: dict | None = None,
-#             queue_size: int = 4,
-            
-#             recv_data_group:dist.ProcessGroup | None = None,
-#             send_data_group:dist.ProcessGroup | None = None,
-            
-#             recv_data_device: str = "cpu",
-#             send_data_device:str = "cpu",
-#             model_device:str = "cpu",
-            
-#             data_dtype: torch.dtype = torch.float32
-#             ):
-#         self.model = model.to(model_device)
-#         self.model_device = model_device
-#         self.prompt_node = prompt_node
-#         self.sending_node = sending_node
-#         self.data_dtype = data_dtype
-
-#         self.recv_data_group = recv_data_group
-#         self.send_data_group = send_data_group
-
-#         self.recv_data_device = recv_data_device
-#         self.send_data_device = send_data_device
-
-
-#         self.control_config = {
-#             'end':False,
-#             'append':True
-#         }
-        
-#         for key, value in self.control_config.items():
-#             if not isinstance(value, int):
-#                 raise ValueError(f"control_config{key} must be int, got {type(value)}")
-#         control_dim = [len(self.control_config)]
-
-#         #keep the queue of NCCL to 1(this nccl keeps getting problemssssssssss!!!!!!!!!)
-#         recv_queue_size = queue_size
-#         send_queue_size = queue_size
-
-#         if recv_data_group is not None:
-#             recv_queue_size = 1
-#         if send_data_group is not None:
-#             send_queue_size = 1
-
-
-
-#         #these are all for append=False.
-#         self.send = PipeSender(
-#             destination=sending_node,
-#             data_dim=sending_dim,
-#             control_dim=control_dim,
-#             control_queue_size=queue_size,
-#             data_queue_size=send_queue_size,
-#             control_group=None,
-#             data_group=send_data_group,
-#             control_device="cpu",
-#             data_device=send_data_device,
-#             control_dtype=torch.int32,
-#             data_dtype=data_dtype,
-#         )
-
-#         self.recv = PipeReceiver(
-#             source=receiving_node,
-#             control_dim=control_dim,
-#             data_dim=receiving_dim,
-#             control_queue_size=queue_size,
-#             data_queue_size=recv_queue_size,
-#             control_group=None,
-#             data_group=recv_data_group,
-#             control_device="cpu",
-#             data_device=recv_data_device,
-#             control_dtype=torch.int32,
-#             data_dtype=data_dtype,
-#         )
-
-#     def run(self)->None:
-#         running=True
-#         append_state = True
-#         while running:
-#             if append_state:
-
-#                 size = torch.empty([3], dtype=torch.int32)
-#                 dist.recv(size, src=self.receiving_node, tag=99)
-#                 if size[0]==0:
-#                     dist.send(size, dst=self.sending_node, tag=99)
-#                     running=False
-#                     break
-
-#                 ten = torch.empty(size, dtype=self.data_dtype)
-#                 dist.recv(ten, src=self.receiving_node, group=self.recv_data_group, tag=99)
-                
-#                 with torch.no_grad():
-#                     inp = ten.to(self.model_device)
-#                     out_= self.model(inp)
-#                     ten = out_.to(self.send_data_device)
-                
-#                 size = torch.tensor(ten.shape, dtype=torch.int32)
-#                 dist.send(size, dst=self.sending_node)
-#                 dist.send(ten, dst=self.send_data_device, group=self.send_data_group)
-#                 append_state = False
-                
-#             else:
-#                 r_ctl, r_ten = self.recv.recv()
-#                 s_ctl, s_ten = self.send.getBuffer()
-
-                
-#                 pass
-
-
-
-
-#         self.send.close()
-#         self.recv.close()
-
-
-############################################
+#####################################################################
 class AddOne(nn.Module):
     def forward(self, x):
         return x + 1
@@ -795,6 +761,9 @@ elif rank == 2:
 
 dist.barrier()
 dist.destroy_process_group()
+
+
+
 # size = [2, 3]
 
 # if rank==0:
