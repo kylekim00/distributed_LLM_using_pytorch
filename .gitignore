@@ -1,2 +1,4 @@
 models/
 __pycache__/
+data/
+grad_dist.ipynb

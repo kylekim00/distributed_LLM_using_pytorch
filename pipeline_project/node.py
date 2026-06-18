@@ -7,6 +7,7 @@ import torch.distributed as dist
 from .pipe import *
 import torch.nn as nn
 
+DATA_TYPE = torch.bfloat16
 
 class LLMLayerNode1:
     def __init__(
@@ -38,8 +39,8 @@ class LLMLayerNode1:
         # prompt_send_data_device: str = "cpu",
 
 
-        input_dtype: torch.dtype = torch.float32, 
-        output_dtype: torch.dtype = torch.float32,
+        input_dtype: torch.dtype = DATA_TYPE, 
+        output_dtype: torch.dtype = DATA_TYPE,
         model_device: str = "cpu",
 
         # send_data_group: dist.ProcessGroup | None = None,
@@ -104,84 +105,85 @@ class LLMLayerNode1:
         self.model.eval()
         past_key_values = None
         cache_len = 0
-        while True:
-            if self.state:
-                ctl, X = self.prompt_recv.recv()
-                if ctl['end']:
-                    self.layer2_dynamic_send.send(ctl, None) 
-                    self.prompt_recv.release(X)
-                    break
-                if ctl['data'] == 0:
+        with torch.inference_mode():
+            while True:
+                if self.state:
+                    ctl, X = self.prompt_recv.recv()
+                    if ctl['end']:
+                        self.layer2_dynamic_send.send(ctl, None) 
+                        self.prompt_recv.release(X)
+                        break
+                    if ctl['data'] == 0:
+                        self.prompt_recv.release(X) 
+                        continue
+                    input1 = X.squeeze(-1).long().to(self.model_device) 
+
+                    cache_position = torch.arange(cache_len, input1.shape[1] + cache_len, device=input1.device) 
+                    cache_len = cache_len + input1.shape[1] 
+
+                    _res = self.model(
+                        input_ids = input1,
+                        past_key_values = past_key_values,
+                        cache_position=cache_position,
+                        use_cache = True
+                        )
+
+                    past_key_values = _res["past_key_values"]
+
+                    # _out = _res["logits"][:, -1].argmax(dim=-1, keepdim=True) #why the fxxk did you do this???
+                    if self.layer2_send_data_device_is_cpu:
+                        out = _res["hidden_states"].to(device="cpu", dtype=self.output_dtype) 
+                    else:
+                        #if model and layer2_send node exists in a different GPU device, then this might get an error.
+                        out = _res["hidden_states"].to(dtype=self.output_dtype) 
+
+
+                    self.layer2_dynamic_send.send(ctl,out) #doesn't need get_buffer()
                     self.prompt_recv.release(X) 
-                    continue
-                input1 = X.squeeze(-1).long().to(self.model_device) 
+                    self.state = False
+                else:
+                    #prompt recv
+                    # ctl_prompt, _ = self.prompt_recv.recv()
+                    # if ctl_prompt['end']:
+                    #     break
 
-                cache_position = torch.arange(cache_len, input1.shape[1] + cache_len, device=input1.device) 
-                cache_len = cache_len + input1.shape[1] 
+                    #next_token recv
+                    ctl, next_token = self.layer2_fixed_recv.recv()
+                    if ctl['end']:
+                        self.layer2_fixed_recv.release(next_token)
+                        self.layer2_fixed_send.send(ctl)
+                        break
+                    if ctl['eop']:
+                        self.state = True
+                        self.layer2_fixed_recv.release(next_token)
+                        continue
 
-                _res = self.model(
-                    input_ids = input1,
-                    past_key_values = past_key_values,
-                    cache_position=cache_position,
-                    use_cache = True
+
+                    input1 = next_token.long().to(self.model_device)
+                    cache_position = torch.tensor([cache_len], device=input1.device)
+                    cache_len = cache_len + 1
+
+                    _res = self.model(
+                        input_ids = input1,
+                        past_key_values = past_key_values,
+                        cache_position = cache_position,
+                        use_cache = True
                     )
 
-                past_key_values = _res["past_key_values"]
+                    past_key_values = _res["past_key_values"]
+                    _out = _res["hidden_states"]
 
-                # _out = _res["logits"][:, -1].argmax(dim=-1, keepdim=True) #why the fxxk did you do this???
-                if self.layer2_send_data_device_is_cpu:
-                    out = _res["hidden_states"].to(device="cpu", dtype=self.output_dtype) 
-                else:
-                    #if model and layer2_send node exists in a different GPU device, then this might get an error.
-                    out = _res["hidden_states"].to(dtype=self.output_dtype) 
+                    if self.layer2_send_data_device_is_cpu:
+                        _out = _out.to(device="cpu", dtype=self.output_dtype) 
+                    else:
+                        #if model and layer2_send node exists in a different GPU device, then this might get an error... But who the hell would do that?
+                        _out = _out.to(dtype=self.output_dtype) 
 
+                    out = self.layer2_fixed_send.get_buffer()
 
-                self.layer2_dynamic_send.send(ctl,out) #doesn't need get_buffer()
-                self.prompt_recv.release(X) 
-                self.state = False
-            else:
-                #prompt recv
-                # ctl_prompt, _ = self.prompt_recv.recv()
-                # if ctl_prompt['end']:
-                #     break
-
-                #next_token recv
-                ctl, next_token = self.layer2_fixed_recv.recv()
-                if ctl['end']:
+                    out.copy_(_out)
+                    self.layer2_fixed_send.send(ctl, out)
                     self.layer2_fixed_recv.release(next_token)
-                    self.layer2_fixed_send.send(ctl)
-                    break
-                if ctl['eop']:
-                    self.state = True
-                    self.layer2_fixed_recv.release(next_token)
-                    continue
-
-
-                input1 = next_token.long().to(self.model_device)
-                cache_position = torch.tensor([cache_len], device=input1.device)
-                cache_len = cache_len + 1
-
-                _res = self.model(
-                    input_ids = input1,
-                    past_key_values = past_key_values,
-                    cache_position = cache_position,
-                    use_cache = True
-                )
-
-                past_key_values = _res["past_key_values"]
-                _out = _res["hidden_states"]
-
-                if self.layer2_send_data_device_is_cpu:
-                    _out = _out.to(device="cpu", dtype=self.output_dtype) 
-                else:
-                    #if model and layer2_send node exists in a different GPU device, then this might get an error... But who the hell would do that?
-                    _out = _out.to(dtype=self.output_dtype) 
-
-                out = self.layer2_fixed_send.get_buffer()
-
-                out.copy_(_out)
-                self.layer2_fixed_send.send(ctl, out)
-                self.layer2_fixed_recv.release(next_token)
     def close(self):
         self.layer2_dynamic_send.close()
         self.layer2_fixed_send.close()
@@ -212,8 +214,8 @@ class LLMLayerNode2:
                 layer1_send_data_group: dist.ProcessGroup | None = None,
                 layer1_send_data_device: str = "cpu",
 
-                input_dtype: torch.dtype = torch.float32, 
-                output_dtype: torch.dtype = torch.float32,
+                input_dtype: torch.dtype = DATA_TYPE, 
+                output_dtype: torch.dtype = DATA_TYPE,
                 model_device: str = "cpu",
 
                 queue_size:int = 4,
@@ -275,113 +277,114 @@ class LLMLayerNode2:
             past_key_values = None
             cache_len = 0
             while True:
-                if self.state:
-                    ctl, X = self.layer1_dynamic_recv.recv()
-                    if ctl['end']:
-                        self.layer1_dynamic_recv.release(X)#just for intuition
-                        break
-                    if ctl['data'] == 0:
+                with torch.inference_mode():
+                    if self.state:
+                        ctl, X = self.layer1_dynamic_recv.recv()
+                        if ctl['end']:
+                            self.layer1_dynamic_recv.release(X)#just for intuition
+                            break
+                        if ctl['data'] == 0:
+                            self.layer1_dynamic_recv.release(X)
+                            continue
+
+
+                        input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
+
+                        cache_position = torch.arange(cache_len, input2.shape[1] + cache_len, device=input2.device) # 이거 추가했어요!!!!
+                        cache_len = cache_len + input2.shape[1] 
+
+                        _res = self.model(
+                            hidden_states = input2, 
+                            past_key_values = past_key_values,
+                            cache_position = cache_position,
+                            use_cache = True
+                            )
+                        past_key_values = _res["past_key_values"]
+                        _out = _res["logits"][:,-1].argmax(dim=-1, keepdim=True)
+
+                        if _out.item() == self.eos_token_id:
+                            ctl['eop'] = True
+                            
+                            self.layer1_send.send(ctl)
+                            self.prompt_send.send(ctl)
+                            self.layer1_dynamic_recv.release(X) 
+                            continue
+
+                        out1 = self.layer1_send.get_buffer()
+                        out2 = self.prompt_send.get_buffer()
+
+                        if self.layer1_send_data_device_is_cpu:
+                            _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
+                        else:
+                            _out1 = _out.to(dtype=self.output_dtype) 
+
+                        out1.copy_(_out1)
+
+                        if self.prompt_send_data_device_is_cpu:
+                            _out2 = _out.to(device="cpu", dtype=self.output_dtype)
+                        else:
+                            _out2= _out.to(dtype=self.output_dtype) 
+
+                        out2.copy_(_out2)
+
+                        self.layer1_send.send(ctl, out1)
+                        self.prompt_send.send(ctl, out2)
+
                         self.layer1_dynamic_recv.release(X)
-                        continue
-
-
-                    input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
-
-                    cache_position = torch.arange(cache_len, input2.shape[1] + cache_len, device=input2.device) # 이거 추가했어요!!!!
-                    cache_len = cache_len + input2.shape[1] 
-
-                    _res = self.model(
-                        hidden_states = input2, 
-                        past_key_values = past_key_values,
-                        cache_position = cache_position,
-                        use_cache = True
-                        )
-                    past_key_values = _res["past_key_values"]
-                    _out = _res["logits"][:,-1].argmax(dim=-1, keepdim=True)
-
-                    if _out.item() == self.eos_token_id:
-                        ctl['eop'] = True
+                        self.state = False
+                    else:
                         
-                        self.layer1_send.send(ctl)
-                        self.prompt_send.send(ctl)
-                        self.layer1_dynamic_recv.release(X) 
-                        continue
+                        ctl, X = self.layer1_fixed_recv.recv() # get next state token
 
-                    out1 = self.layer1_send.get_buffer()
-                    out2 = self.prompt_send.get_buffer()
+                        if ctl['end']:
+                            self.layer1_fixed_recv.release(X)
+                            break
+                        if ctl['eop']:
+                            self.state = True
+                            self.layer1_fixed_recv.release(X)
+                            continue
 
-                    if self.layer1_send_data_device_is_cpu:
-                        _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
-                    else:
-                        _out1 = _out.to(dtype=self.output_dtype) 
+                        input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
+                        cache_position = torch.tensor([cache_len], device=input2.device)
+                        cache_len = cache_len + 1
 
-                    out1.copy_(_out1)
+                        _res = self.model( 
+                            hidden_states = input2, 
+                            past_key_values = past_key_values,
+                            cache_position = cache_position,
+                            use_cache = True
+                        )
 
-                    if self.prompt_send_data_device_is_cpu:
-                        _out2 = _out.to(device="cpu", dtype=self.output_dtype)
-                    else:
-                        _out2= _out.to(dtype=self.output_dtype) 
+                        past_key_values = _res["past_key_values"]
 
-                    out2.copy_(_out2)
+                        _out = _res["logits"][:,-1].argmax(dim=-1, keepdim=True)
 
-                    self.layer1_send.send(ctl, out1)
-                    self.prompt_send.send(ctl, out2)
+                        out1 = self.layer1_send.get_buffer()
+                        out2 = self.prompt_send.get_buffer()
 
-                    self.layer1_dynamic_recv.release(X)
-                    self.state = False
-                else:
-                    
-                    ctl, X = self.layer1_fixed_recv.recv() # get next state token
+                        if self.layer1_send_data_device_is_cpu:
+                            _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
+                        else:
+                            _out1 = _out.to(dtype=self.output_dtype)
 
-                    if ctl['end']:
+                        out1.copy_(_out1)
+
+                        if self.prompt_send_data_device_is_cpu:
+                            _out2 = _out.to(device="cpu", dtype=self.output_dtype) 
+                        else:
+                            _out2 = _out.to(dtype=self.output_dtype)
+
+                        out2.copy_(_out2)
+
+                        if _out.item() == self.eos_token_id:
+                            ctl['eop'] = True
+                            self.state = True
+
+
+                        self.layer1_send.send(ctl, out1)
+                        self.prompt_send.send(ctl, out2)
+
                         self.layer1_fixed_recv.release(X)
-                        break
-                    if ctl['eop']:
-                        self.state = True
-                        self.layer1_fixed_recv.release(X)
-                        continue
-
-                    input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
-                    cache_position = torch.tensor([cache_len], device=input2.device)
-                    cache_len = cache_len + 1
-
-                    _res = self.model( 
-                        hidden_states = input2, 
-                        past_key_values = past_key_values,
-                        cache_position = cache_position,
-                        use_cache = True
-                    )
-
-                    past_key_values = _res["past_key_values"]
-
-                    _out = _res["logits"][:,-1].argmax(dim=-1, keepdim=True)
-
-                    out1 = self.layer1_send.get_buffer()
-                    out2 = self.prompt_send.get_buffer()
-
-                    if self.layer1_send_data_device_is_cpu:
-                        _out1 = _out.to(device="cpu", dtype=self.output_dtype) 
-                    else:
-                        _out1 = _out.to(dtype=self.output_dtype)
-
-                    out1.copy_(_out1)
-
-                    if self.prompt_send_data_device_is_cpu:
-                        _out2 = _out.to(device="cpu", dtype=self.output_dtype) 
-                    else:
-                        _out2 = _out.to(dtype=self.output_dtype)
-
-                    out2.copy_(_out2)
-
-                    if _out.item() == self.eos_token_id:
-                        ctl['eop'] = True
-                        self.state = True
-
-
-                    self.layer1_send.send(ctl, out1)
-                    self.prompt_send.send(ctl, out2)
-
-                    self.layer1_fixed_recv.release(X)
 
         def close(self):
             self.layer1_dynamic_recv.close()
@@ -409,8 +412,8 @@ class LLMPromptNode:
                 layer2_recv_data_group:dist.ProcessGroup | None = None,
                 layer2_recv_data_device:str = "cpu",
 
-                input_dtype : torch.dtype = torch.float32, 
-                output_dtype : torch.dtype = torch.float32,
+                input_dtype : torch.dtype = DATA_TYPE, 
+                output_dtype : torch.dtype = DATA_TYPE,
 
                 queue_size: int = 4
                 ):

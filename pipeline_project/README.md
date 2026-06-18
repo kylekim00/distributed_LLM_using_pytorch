@@ -6,7 +6,7 @@ A pipeline-parallel inference system for **Llama-3.2-3B-Instruct** built on top 
 
 ## Architecture
 
-![Pipeline Architecture](./diagramv3.png)
+![Pipeline Architecture](./../diagramv3.png)
 
 Three processes (ranks) work together in a ring-like pipeline:
 

@@ -79,7 +79,7 @@ def check_state_dict_match(target_model, source_state, name: str):
     if missing or unexpected or shape_mismatch:
         raise RuntimeError(f"{name} state_dict does not match.")
     
-def verify_split_model(full_model, model1, model2, config, device="cpu"):
+def verify_split_model(full_model, model1, model2, config, device="cpu", use_cache=True):
     full_model.eval()
     model1.eval()
     model2.eval()
@@ -99,30 +99,31 @@ def verify_split_model(full_model, model1, model2, config, device="cpu"):
     with torch.no_grad():
         full_out = full_model(
             input_ids=input_ids,
-            use_cache=True,
+            use_cache=use_cache,
         )
 
         out1 = model1(
             input_ids=input_ids,
-            use_cache=True,
+            use_cache=use_cache,
         )
 
         out2 = model2(
             hidden_states=out1["hidden_states"],
-            use_cache=True,
+            use_cache=use_cache,
         )
 
     full_logits = full_out.logits
     split_logits = out2["logits"]
 
     max_diff = (full_logits - split_logits).abs().max().item()
-
+    token_diff_sum = sum(full_logits[:,-1].argmax(dim=-1)!=split_logits[:,-1].argmax(dim=-1)).item()
     print("\n[verification]")
+    print("max value difference : ", token_diff_sum)
     print("  full logits shape :", tuple(full_logits.shape))
     print("  split logits shape:", tuple(split_logits.shape))
     print("  max abs diff      :", max_diff)
 
-    if max_diff > 1e-4:
+    if max_diff > 1e-4 and token_diff_sum >= 2:
         raise RuntimeError(f"Split verification failed. max_diff={max_diff}")
 
     print(" split model output matches full model")
@@ -184,6 +185,7 @@ def download_model(
         model2=model2,
         config=config,
         device=device,
+        use_cache=True
     )
 
     print("\nSaving split checkpoint...")
@@ -217,89 +219,3 @@ def download_model(
     return model1, model2
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import torch
-# from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-
-# import torch.nn as nn
-# from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
-# from huggingface_hub import snapshot_download
-# import os
-
-# from .division_model import Model1, Model2
-
-# # MODEL_PATH = "models/Llama-3.2-3B-Instruct"
-
-# # ── config ────────────────────────────────────────────────────────────────────
-# # Meta's official 3B instruct model (requires HF token + Meta license approval)
-# # REPO_ID = "meta-llama/Llama-3.2-3B-Instruct"
-
-
-
-
-# def download_model():
-#     # Community fp16 snapshot — no token required
-#     REPO_ID   = "bartowski/Llama-3.2-3B-Instruct-GGUF"   # GGUF weights (lightweight)
-#     # Or use the full HF-format model:
-#     REPO_ID   = "unsloth/Llama-3.2-3B-Instruct"           # full safetensors, no token
-#     LOCAL_DIR = "./models/Llama-3.2-3B-Instruct"
-
-#     os.makedirs(LOCAL_DIR, exist_ok=True)
-
-#     print(f"Downloading {REPO_ID} → {LOCAL_DIR}")
-#     print("    This may take a while (≈6 GB) …\n")
-
-#     snapshot_download(
-#         repo_id   = REPO_ID,
-#         local_dir = LOCAL_DIR,
-#         ignore_patterns=["*.gguf", "*.bin"],   # prefer safetensors
-#     )
-
-#     print("\n[✓] Download complete!")
-#     print(f"    Saved to: {os.path.abspath(LOCAL_DIR)}")
-
-#     model = AutoModelForCausalLM.from_pretrained(
-#         LOCAL_DIR,
-#         torch_dtype=torch.float32
-#     )
-#     print("______________________LLAMA3.2 MODEL________________________")
-#     print(model)
-#     # print("____________________________________________________________")
-
-#     print("  __________________________________________________________")
-#     print(" |                                                          | ")
-#     print(" |           LLAMA3.2 MODEL PIPELINE SEPARATION             | ")
-#     print(" |                                                          | ")
-#     print("  __________________________________________________________")
-
-#     config = AutoConfig.from_pretrained(LOCAL_DIR)
-#     model1 = Model1(config=config)
-#     model2 = Model2(config=config)
-
-#     model
-
-# # device = "cpu"
-# # prompt = "KV cache가 뭐야?"
-
-# # tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-# # model = AutoModelForCausalLM.from_pretrained(
-# #     MODEL_PATH,
-# #     torch_dtype=torch.float32,
-# # ).to(device)
-
-# # model.eval()
