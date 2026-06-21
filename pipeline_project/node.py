@@ -290,7 +290,7 @@ class LLMLayerNode2:
 
                         input2 = X.to(device=self.model_device, dtype=self.input_dtype) 
 
-                        cache_position = torch.arange(cache_len, input2.shape[1] + cache_len, device=input2.device) # 이거 추가했어요!!!!
+                        cache_position = torch.arange(cache_len, input2.shape[1] + cache_len, device=input2.device) 
                         cache_len = cache_len + input2.shape[1] 
 
                         _res = self.model(
