@@ -130,7 +130,8 @@ def run_main(
 
                 # layer1 -> layer2 hidden 통신
                 layer2_send_data_group=pg_12,
-                layer2_send_data_device=model_device if use_cuda else "cpu",
+                #layer2_send_data_device=model_device if use_cuda else "cpu",
+                layer2_send_data_device= "cpu",
 
                 # layer2 -> layer1 next token
                 layer2_recv_data_group=None,
@@ -169,7 +170,8 @@ def run_main(
 
                 # layer1 -> layer2 hidden
                 layer1_recv_data_group=pg_12,
-                layer1_recv_data_device=model_device if use_cuda else "cpu",
+                # layer1_recv_data_device=model_device if use_cuda else "cpu",
+                layer1_recv_data_device= "cpu",
 
                 # layer2 -> layer1 next token
                 layer1_send_data_group=None,
