@@ -13,7 +13,7 @@ from transformers.models.llama.modeling_llama import (
 def choose_attention_backend(device: str = "cpu") -> str:
     if device.startswith("cuda") and torch.cuda.is_available():
         try:
-            import flash_attn  # noqa: F401
+            import flash_attn 
             return "flash_attention_2"
         except Exception:
             pass
@@ -81,12 +81,24 @@ class Model1(nn.Module):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
 
+        causal_mask = None
+        if seq_len > 1:
+            k_len = cache_position[-1].item() + 1 if cache_position is not None else seq_len
+            causal_mask = torch.full(
+                (batch_size, 1, seq_len, k_len),
+                fill_value=torch.finfo(hidden_states.dtype).min,
+                device=device,
+            )
+            for i in range(seq_len):
+                valid_len = cache_position[i].item() + 1 if cache_position is not None else i + 1
+                causal_mask[:, :, i, :valid_len] = 0.0
+
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
@@ -153,12 +165,24 @@ class Model2(nn.Module):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
 
+        causal_mask = None
+        if seq_len > 1:
+            k_len = cache_position[-1].item() + 1 if cache_position is not None else seq_len
+            causal_mask = torch.full(
+                (batch_size, 1, seq_len, k_len),
+                fill_value=torch.finfo(hidden_states.dtype).min,
+                device=device,
+            )
+            for i in range(seq_len):
+                valid_len = cache_position[i].item() + 1 if cache_position is not None else i + 1
+                causal_mask[:, :, i, :valid_len] = 0.0
+
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
-                attention_mask=None,
+                attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
