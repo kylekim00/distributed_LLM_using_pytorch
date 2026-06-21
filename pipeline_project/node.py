@@ -7,7 +7,9 @@ import torch.distributed as dist
 from .pipe import *
 import torch.nn as nn
 
-DATA_TYPE = torch.bfloat16
+DATA_TYPE = torch.float32
+
+
 
 class LLMLayerNode1:
     def __init__(
